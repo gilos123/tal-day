@@ -1,0 +1,18 @@
+---
+title: "Futexes"
+slug: "17-futexes"
+order: 17
+status: "stub"
+summary: "The Linux primitive that every pthread mutex ultimately sits on top of. Wait if the value matches; wake when it doesn't."
+tags: ["kernel", "synchronization"]
+---
+
+## What this lesson will cover
+
+- `futex(FUTEX_WAIT)` / `futex(FUTEX_WAKE)` — the two-call kernel primitive.
+- Why the userspace atomic comparison is done *in the kernel* to avoid a lost-wakeup race.
+- Building a mutex: fast path in userspace (CAS 0→1), slow path to `FUTEX_WAIT`.
+- Futex queues, priority-inheritance futexes (`FUTEX_LOCK_PI`), and robust futexes.
+- Windows `WaitOnAddress`, macOS `os_unfair_lock`, and the design convergence.
+
+<Aside variant="note">Coming soon.</Aside>

@@ -1,0 +1,18 @@
+---
+title: "Benchmarking concurrent code"
+slug: "20-benchmarking"
+order: 20
+status: "stub"
+summary: "Throughput, latency, tail percentiles, cache effects. What to measure, what lies, and how to compare variants fairly."
+tags: ["benchmarking", "performance"]
+---
+
+## What this lesson will cover
+
+- Amdahl and Gustafson, briefly. Why serial fraction bounds you.
+- Warmup, pinning, governor settings on Linux (`cpupower`), disabling hyperthreading.
+- Measuring tail latency: HDR histograms, coordinated omission, outlier investigation.
+- False sharing benchmark: a `char pad[64]` changing performance 10×.
+- Presenting results: median + 99th percentile + run-to-run variance, never a single number.
+
+<Aside variant="note">Coming soon.</Aside>

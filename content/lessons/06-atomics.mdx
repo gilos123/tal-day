@@ -1,0 +1,225 @@
+---
+title: "Atomics: load, store, RMW"
+slug: "06-atomics"
+order: 6
+status: "full"
+summary: "The operations the memory model actually talks about. `atomic_load`, `atomic_store`, and the read-modify-write family: fetch_add, exchange, compare_exchange."
+tags: ["atomics", "c11"]
+---
+
+The C11 memory model in lesson 5 is written in terms of *atomic*
+operations. A plain read or write of a non-atomic location that races
+with another access is undefined. So: every location written by one
+thread and read by another — outside of a mutex-protected region —
+must be declared with an atomic type.
+
+`<stdatomic.h>` gives us the type qualifiers and the operations.
+
+## Declaring atomics
+
+```c
+#include <stdatomic.h>
+
+atomic_int      x;          // plain atomic of int
+atomic_long     y;          // of long
+_Atomic(char *) p;          // atomic pointer
+_Atomic(struct foo) s;      // lock-free only if small; otherwise compiler
+                            //   falls back to a hidden mutex
+```
+
+`_Atomic(T)` is the fundamental form. `atomic_int` etc. are typedefs
+provided by the standard for convenience. The compiler will use
+lock-free hardware instructions when `T` is small enough — typically
+up to the machine word size, 16 bytes on x86-64 with `cmpxchg16b`.
+Larger types are simulated with a hidden mutex, which defeats the
+point; `ATOMIC_*_LOCK_FREE` macros tell you when you're safe.
+
+## The three flavors of operation
+
+### Load
+
+```c
+int v = atomic_load_explicit(&x, memory_order_acquire);
+```
+
+Reads the current value atomically. The ordering argument controls
+synchronization; we'll see the full set in lesson 7. For now: `acquire`
+pairs with a `release` store.
+
+### Store
+
+```c
+atomic_store_explicit(&x, 42, memory_order_release);
+```
+
+Writes a value atomically. `release` publishes every preceding write
+in this thread to any thread that performs a matching acquire load.
+
+### Read-modify-write (RMW)
+
+```c
+int old = atomic_fetch_add(&x, 1);          // seq_cst (default)
+int prev = atomic_exchange(&x, 99);
+bool ok  = atomic_compare_exchange_strong(&x, &expected, desired);
+```
+
+These perform a read and a write atomically as a unit. No other thread
+can interleave between the two halves. On x86, most RMWs compile to a
+single `lock`-prefixed instruction. On ARM, they compile to an
+LL/SC loop that retries on contention.
+
+**Compare-and-exchange (CAS)** is the most general RMW. It does:
+
+```c
+// pseudocode
+bool cas(atomic_int *a, int *expected, int desired) {
+    int cur = *a;
+    if (cur == *expected) { *a = desired; return true; }
+    *expected = cur; return false;
+}
+```
+
+— atomically. Every higher-level primitive in lessons 9–18 is some
+clever pattern over CAS.
+
+## Fixing lesson 1
+
+The minimal edit to the racing counter:
+
+<Snippet file="06-atomic-counter.c" stripHeader highlightLines="3,10,15" />
+
+Two lines change: the type of `x`, and the update expression. The
+program is now data-race-free. `atomic_fetch_add` defaults to
+`memory_order_seq_cst`, which is overkill for a counter whose value no
+other thread synchronizes against — we'll weaken it in the next
+lesson.
+
+## Why `++` on a plain `int` isn't atomic, even on x86
+
+A common misconception: "on x86, `int` increment compiles to a single
+instruction, so it's safe." It compiles to a single *memory operand*
+instruction like `addl $1, x(%rip)`, which is *not* atomic — the CPU
+performs a hidden read, ALU op, and write, and another core can
+invalidate the line in between. You need the `lock` prefix for
+atomicity, which is exactly what `atomic_fetch_add` emits:
+
+```nasm
+; gcc -O2 -S  for atomic_fetch_add(&x, 1)
+lock incq x(%rip)
+```
+
+The `lock` prefix is the one thing a mere `++` does not produce.
+
+## compare_exchange: strong vs weak
+
+CAS comes in two forms. Both have the same semantics when they
+succeed:
+
+```c
+atomic_compare_exchange_strong(&a, &expected, desired);  // never spurious fail
+atomic_compare_exchange_weak(&a, &expected, desired);    // may spuriously fail
+```
+
+`_weak` is allowed to fail even when `*a == *expected`, because that's
+how LL/SC hardware works on ARM/POWER: the reservation can be lost
+for reasons unrelated to the value. It's strictly faster inside a
+retry loop. `_strong` is what you want when you can't afford a spurious
+failure — e.g., a single-shot CAS with no retry.
+
+The idiom:
+
+```c
+int expected = atomic_load(&a);
+int desired;
+do {
+    desired = /* derive from expected */;
+} while (!atomic_compare_exchange_weak(&a, &expected, desired));
+```
+
+On failure, `expected` is updated to the value that was actually in
+`a`, so the next iteration starts from a fresh snapshot.
+
+<Aside variant="hard" title="RMW ordering on failure">
+`compare_exchange_*` takes *two* memory orders: one for success, one
+for failure. The failure order must be no stronger than the success
+order, and must not be `release` or `acq_rel` (failure performs no
+write, so those are meaningless). Read carefully before passing
+`memory_order_seq_cst` on both — it's rarely what you need.
+</Aside>
+
+## Exercises
+
+<Exercise n="1" title="Counter invariant">
+The following function looks like an atomic-free alternative:
+
+```c
+void bump(atomic_int *a) {
+    atomic_store(a, atomic_load(a) + 1);
+}
+```
+
+Is this equivalent to `atomic_fetch_add(a, 1)`?
+
+<Hint>
+How many operations? How many opportunities for interleaving?
+</Hint>
+
+<Solution>
+No. `atomic_store(a, atomic_load(a) + 1)` is *two* atomic operations
+— a load and a store — with ordinary C evaluation between them.
+Another thread can RMW `a` between the load and the store, and the
+store will clobber their update. Exactly the lesson-1 race, with
+fancier primitives.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="A one-shot flag">
+Implement `bool set_once(atomic_int *flag)` that returns true the
+first time it's called (across all threads) with that pointer, and
+false every subsequent call. Use exactly one atomic operation per
+call.
+
+<Solution>
+```c
+bool set_once(atomic_int *flag) {
+    int expected = 0;
+    return atomic_compare_exchange_strong(flag, &expected, 1);
+}
+```
+
+The first caller observes 0, swaps in 1, returns true. Every later
+caller observes 1, CAS fails, returns false. Use
+`compare_exchange_strong` — a spurious failure here would return the
+wrong answer.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Max update">
+Write `atomic_update_max(atomic_int *a, int candidate)` that atomically
+stores `candidate` into `*a` only if `candidate > *a`. It should work
+even under heavy contention.
+
+<Hint>
+Classic CAS loop. What do you re-derive each iteration?
+</Hint>
+
+<Solution>
+```c
+void atomic_update_max(atomic_int *a, int candidate) {
+    int cur = atomic_load_explicit(a, memory_order_relaxed);
+    while (candidate > cur) {
+        if (atomic_compare_exchange_weak_explicit(
+                a, &cur, candidate,
+                memory_order_release, memory_order_relaxed)) {
+            return;
+        }
+        /* on failure, cur was updated with the observed value */
+    }
+}
+```
+
+Note: on failure, CAS writes the observed current value into `cur`, so
+we re-check `candidate > cur` at the top of the loop. If a racing
+thread installed a larger value, we exit without writing.
+</Solution>
+</Exercise>

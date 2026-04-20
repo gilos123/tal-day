@@ -1,0 +1,254 @@
+---
+title: "Mini-project: multi-client TCP server"
+slug: "21-tcp-server"
+order: 21
+status: "full"
+summary: "A working TCP echo server in ~80 lines of C. One thread per connection, clean peer logging, SIGPIPE handled, resilient against disconnects. The concurrency patterns lesson 3 gave us, applied end-to-end."
+tags: ["case-study", "networking", "pthreads"]
+---
+
+We have enough tools to build something people actually ship. The
+canonical first concurrent network program is an echo server: accept
+TCP connections, read bytes, write them back. Supporting many clients
+at once is the interesting part, and we'll do it with the simplest
+concurrency model that works — **one thread per connection**.
+
+## What this teaches
+
+- The accept-loop pattern for stream sockets.
+- Why every connection handler needs to be on its own thread (or
+  the equivalent: a state machine + `epoll`).
+- Detached threads as fire-and-forget workers.
+- The one ignored signal you need for robust TCP code.
+
+## The code
+
+<Snippet file="21-tcpserver.c" stripHeader />
+
+Try it:
+
+```sh
+# terminal 1
+$ make run-21-tcpserver
+echo server listening on port 7878
+
+# terminal 2
+$ nc localhost 7878
+hello
+hello
+how are you
+how are you
+
+# terminal 3 — prove it's concurrent
+$ nc localhost 7878
+hi from another client
+hi from another client
+```
+
+Both `nc` sessions are echoed independently. The server log in
+terminal 1 shows `[+] 127.0.0.1:NNNNN connected` and `[-] ...
+disconnected` events for each connection.
+
+## Walking the flow
+
+<Diagram alt="Timeline: main thread runs accept loop; each accept spawns a detached handler thread that runs an independent recv/send loop until EOF, then frees itself.">
+<svg width="640" height="240" viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" fontFamily="var(--font-mono)" fontSize="11">
+  <g fill="var(--color-fg)">
+    <text x="10" y="25" fill="var(--color-fg-muted)">main</text>
+    <text x="10" y="95" fill="var(--color-fg-muted)">handler A</text>
+    <text x="10" y="165" fill="var(--color-fg-muted)">handler B</text>
+
+    <rect x="80" y="15" width="80" height="20" fill="var(--color-accent)" />
+    <text x="88" y="30" fill="var(--color-accent-fg)">listen()</text>
+    <rect x="160" y="15" width="50" height="20" fill="var(--color-accent-muted)" />
+    <text x="168" y="30" fill="var(--color-accent-fg)">accept</text>
+    <rect x="260" y="15" width="50" height="20" fill="var(--color-accent-muted)" />
+    <text x="268" y="30" fill="var(--color-accent-fg)">accept</text>
+    <rect x="360" y="15" width="260" height="20" fill="var(--color-surface-2)" stroke="var(--color-border)"/>
+    <text x="368" y="30" fill="var(--color-fg-muted)">blocked in accept for next connection</text>
+
+    <line x1="210" y1="35" x2="80" y2="80" stroke="var(--color-accent-muted)" strokeDasharray="3,3" markerEnd="url(#a21)"/>
+    <rect x="80" y="82" width="420" height="20" fill="var(--color-accent)" />
+    <text x="88" y="97" fill="var(--color-accent-fg)">recv → send → recv → … → close → detach frees</text>
+
+    <line x1="310" y1="35" x2="80" y2="150" stroke="var(--color-accent-muted)" strokeDasharray="3,3" markerEnd="url(#a21)"/>
+    <rect x="80" y="152" width="320" height="20" fill="var(--color-accent)" />
+    <text x="88" y="167" fill="var(--color-accent-fg)">recv → send → recv → … → close</text>
+
+    <defs><marker id="a21" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-accent-muted)"/></marker></defs>
+
+    <line x1="0" y1="200" x2="640" y2="200" stroke="var(--color-border)"/>
+    <text x="0" y="215" fill="var(--color-fg-muted)" fontSize="10">time →</text>
+  </g>
+</svg>
+</Diagram>
+
+Three subtleties worth calling out:
+
+### 1. `SO_REUSEADDR` on the listener
+
+Without it, killing the server and restarting it within the kernel's
+TIME_WAIT window (a minute or so) gives you `Address already in use`.
+`SO_REUSEADDR` lets you reuse the port immediately. It does *not*
+let two processes bind the same port at the same time — it only
+suppresses the TIME_WAIT check.
+
+### 2. `signal(SIGPIPE, SIG_IGN)`
+
+When a peer closes the connection while we're mid-`send`, the kernel
+delivers `SIGPIPE` to us. The default action is to terminate the
+process. For a server, that's catastrophic: a single misbehaving
+client can kill you. Ignoring the signal instead turns that event
+into a normal `send` returning `-1` with `errno == EPIPE`, which the
+handler cleans up and exits.
+
+Alternative: use `send(fd, buf, n, MSG_NOSIGNAL)` per call. Either
+works; the signal ignore is one line.
+
+### 3. `PTHREAD_CREATE_DETACHED`
+
+We never `pthread_join` the handler threads. They run their connection
+to EOF and exit, freeing their own pthread structs on the way out.
+Joining every one would require bookkeeping a list of TIDs, which
+serves no purpose here — we don't care about handler return values,
+and we don't want to wait for them at shutdown (the kernel tears
+everything down on exit).
+
+## Why "one thread per connection" isn't the final answer
+
+For small N (a few hundred concurrent connections, modest work per
+request), thread-per-connection is fine and simple. The problems
+appear past that:
+
+- **Stack footprint.** 8 MB per thread × 10,000 connections = 80 GB
+  of virtual address space. Fix: `pthread_attr_setstacksize(...,
+  256*1024)` before creating each handler. Even so, 10,000 threads
+  is a lot of kernel bookkeeping.
+- **Context-switch cost.** Most connections are mostly idle. The
+  scheduler cycles through all of them to find the few with pending
+  I/O. Each switch is hundreds of nanoseconds and flushes cache
+  state.
+- **C10K-style scale.** Past a few thousand connections you want an
+  event-driven model: one (or a few) threads running `epoll_wait`
+  against every socket, servicing only the ready ones. That's a
+  different course — `libuv`, `io_uring`, `liburing` — but the
+  underlying concurrency primitives you'd build there are the same
+  ones we've been using.
+
+**Hybrid** models (a thread pool of N workers, each running `epoll`
+over a partition of sockets) get the best of both. Lesson 18's pool
+is the front half of such a system; this lesson's accept loop is
+the back half. Stitching them together — a server that accepts on
+the main thread and posts each connection's work to the pool — is a
+good exercise below.
+
+<Aside variant="hard" title="On robustness">
+Real TCP servers also handle: short reads/writes (always write in a
+loop — we do), `EINTR` from blocked syscalls (we handle `accept` and
+`send`), zero-length reads meaning EOF (we check), slowloris-style
+clients that read one byte per minute (we don't — a production
+server needs `SO_RCVTIMEO`/`SO_SNDTIMEO`), and graceful shutdown on
+`SIGINT` (we don't — we rely on `kill -9`). Handling all of these
+correctly in pure thread-per-connection code is about 300 lines.
+An `epoll`-based rewrite at the same robustness level is about 800.
+</Aside>
+
+## Exercises
+
+<Exercise n="1" title="Why MSG_NOSIGNAL is sometimes insufficient">
+Suppose you replace the global `signal(SIGPIPE, SIG_IGN)` with
+`MSG_NOSIGNAL` on every `send`. What other syscall in this program
+can still send you `SIGPIPE`?
+
+<Hint>
+What writes to a closed socket besides `send`?
+</Hint>
+
+<Solution>
+`write(fd, ...)` will. If any code path ever uses `write` on the
+socket — including future-you refactoring `send` to `write` for
+some generic I/O utility — `SIGPIPE` is back. Ignoring the signal
+globally is a one-line defense against this entire class of bug.
+On servers, it is the right default.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Connect the TCP server to the thread pool">
+Instead of spawning one thread per connection, submit each accepted
+connection as a task to the lesson-18 thread pool. What does the
+task function look like, and what practical scalability limit does
+this trade for?
+
+<Hint>
+The task's `arg` carries the fd; the task does the recv/send loop.
+What happens when all N workers are blocked in `recv`?
+</Hint>
+
+<Solution>
+```c
+typedef struct { int fd; } conn_t;
+
+static void task_handle(void *arg) {
+    conn_t *c = arg;
+    /* identical recv/send loop to handle_client */
+    free(c);
+}
+
+/* in accept loop: */
+conn_t *c = malloc(sizeof *c);
+c->fd = cfd;
+pool_submit(&pool, task_handle, c);
+```
+The trade: fixed worker count, bounded thread cost. The limit: if
+every worker ends up blocked in `recv` on an idle client, new
+connections sit in the accept backlog and eventually `accept`
+returns `ECONNRESET` to newly-arriving clients.
+
+Past that, you need event-driven I/O (`epoll`) inside each worker
+so a single thread can handle many simultaneously-idle sockets.
+That crosses the boundary this lesson left at — see the discussion
+of hybrid models above.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Graceful shutdown">
+Add `SIGINT` handling so Ctrl-C: (a) stops accepting new connections,
+(b) lets existing connections finish their current `recv` and exit,
+(c) prints a summary.
+
+<Hint>
+`sigaction` + a global atomic flag. `accept` returns `-1` with
+`errno == EINTR` when a signal interrupts it.
+</Hint>
+
+<Solution>
+```c
+static atomic_int stop = 0;
+
+static void on_sigint(int _) { (void)_; atomic_store(&stop, 1); }
+
+int main(void) {
+    struct sigaction sa = { .sa_handler = on_sigint };
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    /* ... existing socket setup ... */
+    while (!atomic_load(&stop)) {
+        int cfd = accept(lfd, NULL, NULL);
+        if (cfd < 0) {
+            if (errno == EINTR) continue;   /* re-check `stop` */
+            ...
+        }
+        /* spawn as before */
+    }
+    close(lfd);
+    printf("accept loop closed; waiting a moment for handlers\n");
+    sleep(1);                         /* crude but works for a demo */
+    return 0;
+}
+```
+Real version: track active handlers with a counter (+cv), shutdown
+waits for it to hit zero. Detached threads complicate this; a
+common pattern is to switch to *joinable* handlers the moment
+shutdown is in progress.
+</Solution>
+</Exercise>

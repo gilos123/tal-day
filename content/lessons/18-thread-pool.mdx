@@ -1,0 +1,172 @@
+---
+title: "Mini-project: a thread pool"
+slug: "18-thread-pool"
+order: 18
+status: "full"
+summary: "A complete mutex+condvar thread pool in about 100 lines of C. The scaling limits teach you what lesson 14 (Chase-Lev work-stealing) exists to solve."
+tags: ["case-study", "scheduling", "pthreads"]
+---
+
+We have all the primitives. Let's build the thing every server
+eventually builds for itself: a pool of worker threads pulling from
+a shared queue.
+
+## Design in one paragraph
+
+- `pool_t` has a FIFO queue of `(fn, arg)` tasks guarded by a mutex,
+  plus one condition variable `more` that workers block on when the
+  queue is empty.
+- `pool_submit(fn, arg)` pushes a task and signals one worker.
+- `pool_shutdown()` flips a flag, broadcasts on the CV, and joins
+  every worker.
+- Workers loop: lock, wait for `more` until the queue is non-empty
+  or we're shutting down, pop one task, unlock, run it.
+
+Everything you need was in lesson 3.
+
+## The code
+
+<Snippet file="18-threadpool.c" stripHeader />
+
+Running it on my 4-core machine:
+
+```
+$ ./build/18-threadpool
+[task    0] sum=499500
+[task    1] sum=499500
+[task    2] sum=499500
+[task    3] sum=499500
+[task    4] sum=499500
+[task 1000] sum=499500
+...
+[task 9000] sum=499500
+processed 10000 tasks across 4 workers
+```
+
+All 10,000 tasks executed, no deadlocks, clean shutdown. Under TSAN
+it prints nothing unusual — the queue is well-formed, the condvar
+is used with its mutex, and the shutdown broadcast wakes every
+waiter.
+
+## Why the single queue is a bottleneck
+
+Every `pool_submit` and every pop takes the same mutex. With 4
+workers pulling as fast as they can, the queue mutex is itself a
+serialization point. We can measure it:
+
+<Benchmark title="18-threadpool at various thread counts, 1M trivial tasks">
+  <BenchRow label="1 worker"  value="88 ms"  note="baseline, no contention" />
+  <BenchRow label="2 workers" value="54 ms"  note="scales, mutex barely contended" />
+  <BenchRow label="4 workers" value="43 ms"  note="diminishing returns" />
+  <BenchRow label="8 workers" value="58 ms"  note="worse than 4 — queue mutex is thrashing" />
+  <BenchRow label="16 workers" value="92 ms" note="worse than 1 worker" />
+</Benchmark>
+
+Numbers are illustrative; your machine will differ. The shape is
+universal.
+
+The cure is **per-worker queues** with **work stealing**: each
+worker owns a Chase-Lev deque (lesson 14), pushes its own tasks
+onto the tail, pops from the tail. Idle workers steal from some
+other worker's head. Almost all operations are on per-worker data,
+no global mutex, and the only contention is when a steal races
+with the victim's pop of its last item. This is how every modern
+task runtime — Go's scheduler, Rayon, TBB, Tokio's `spawn_blocking`
+— is built.
+
+But single-queue pools are still used everywhere they're
+appropriate: per-connection worker pools in network servers, web
+server request dispatching, background job queues. When tasks take
+hundreds of microseconds each, the mutex overhead is invisible.
+
+## Extending this pool
+
+A real-world pool grows some combination of these features, each
+with its own trade-offs:
+
+| Feature                    | Cost                                              |
+| -------------------------- | ------------------------------------------------- |
+| Bounded queue              | `pool_submit` can block; need `not_full` CV       |
+| `pool_submit_with_result`  | Futures: each task gets its own CV + payload slot |
+| Priority queues            | Replace FIFO with a heap; harder under contention |
+| Graceful drain             | `drain()` waits for queue empty but keeps workers |
+| Affinity pinning           | `pthread_setaffinity_np` per worker — NUMA locality |
+
+Any one of these is a focused exercise; combining them is how
+production task runtimes grow from 100 lines to 10,000.
+
+## Exercises
+
+<Exercise n="1" title="Add a bounded queue">
+Modify `18-threadpool.c` so `pool_submit` blocks when the queue has
+`MAX_QUEUED` items pending. What new primitive do you need, and what
+subtle shutdown issue does it introduce?
+
+<Hint>
+Mirror the producer-consumer CV pair. On shutdown, what happens to
+producers stuck in `not_full` wait?
+</Hint>
+
+<Solution>
+Add `not_full` CV and a `count` field. `pool_submit` does:
+```c
+while (p->count == MAX_QUEUED && !p->shutdown) pthread_cond_wait(&p->not_full, &p->mu);
+if (p->shutdown) { pthread_mutex_unlock(&p->mu); return -1; }
+```
+Shutdown must now broadcast on BOTH condvars — producers stuck
+waiting for space need to wake up and return an error, not sleep
+forever. A common bug: forgetting to broadcast `not_full` at
+shutdown.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Implement a future">
+Extend the pool so `pool_submit` returns a small handle the caller
+can pass to `pool_wait(h, &result)` to block until the task has
+completed and get its result. What goes in the handle?
+
+<Hint>
+A mutex + CV + the filled-in result. The task's `fn` now writes to
+the handle; the wait function blocks on the handle's CV.
+</Hint>
+
+<Solution>
+```c
+typedef struct {
+    void *result;
+    int done;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+} future_t;
+
+/* submitter makes a future, stores a pointer to it in the task arg,
+ * calls pool_submit with a wrapper that calls user fn, stores the
+ * return into the future, signals it, and unlocks */
+```
+Complexity: who owns the future's lifetime? Usually the caller —
+`pool_wait` is responsible for `free`ing. Make sure wait-and-free
+cannot race with the worker's signal-then-exit: the worker must
+hold the future's mutex during the signal, and the waiter must
+re-check `done` after locking.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Measure it">
+Run the pool with `N_WORKERS` = 1, 2, 4, 8 on your machine with
+1,000,000 trivial tasks. Plot time-to-completion vs N. At what N
+does the curve turn over? What is the dominant cost past that point?
+
+<Solution>
+The turnover point depends on (a) task cost, (b) number of physical
+cores, and (c) memory-system behavior. Expect near-linear scaling
+up to the physical core count, then a plateau or regression.
+
+Past turnover, `perf stat -e cache-misses,LLC-load-misses` usually
+shows the queue's cache line being invalidated on every
+push/pop — each worker's `atomic` or `lock cmpxchg` on the head/tail
+forces the line into M state, bouncing it to every other worker.
+This is the *coherence-bus storm* from lesson 1, now on the queue
+mutex. That observation is the motivation for the per-worker-deque
+design in lesson 14.
+</Solution>
+</Exercise>

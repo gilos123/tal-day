@@ -1,0 +1,317 @@
+---
+title: "Deadlock, livelock, priority inversion"
+slug: "04-deadlock"
+order: 4
+status: "full"
+summary: "Three ways synchronization goes wrong even when every primitive behaves correctly. The good news: one mechanical rule prevents the most common form."
+tags: ["synchronization", "deadlock", "debugging"]
+---
+
+Mutexes are correct in isolation. A pair of correctly-written mutexes
+can still bring your program to a complete halt. This lesson is about
+the three classical patterns: **deadlock** (everyone waits forever),
+**livelock** (everyone keeps running but nobody makes progress), and
+**priority inversion** (the wrong thread is made to wait).
+
+## Deadlock: AB then BA
+
+<Snippet file="04-deadlock.c" stripHeader />
+
+Thread 1 locks `a` then `b`. Thread 2 locks `b` then `a`. Run it and
+it hangs within milliseconds:
+
+```
+$ timeout 2 ./build/04-deadlock
+$ echo $?
+124                              # killed by timeout
+```
+
+<Diagram alt="State diagram: thread 1 holds mutex a and is waiting for mutex b; thread 2 holds mutex b and is waiting for mutex a. The two threads form a cycle in the resource-wait graph and can make no further progress.">
+<svg width="540" height="220" viewBox="0 0 540 220" xmlns="http://www.w3.org/2000/svg" fontFamily="var(--font-mono)" fontSize="12">
+  <g fill="var(--color-fg)">
+    <rect x="40" y="40" width="140" height="60" fill="var(--color-surface-2)" stroke="var(--color-accent)" rx="4"/>
+    <text x="50" y="60" fill="var(--color-fg-muted)">Thread 1</text>
+    <text x="50" y="80">holds: a</text>
+    <text x="50" y="96">waits: b</text>
+
+    <rect x="360" y="40" width="140" height="60" fill="var(--color-surface-2)" stroke="var(--color-accent)" rx="4"/>
+    <text x="370" y="60" fill="var(--color-fg-muted)">Thread 2</text>
+    <text x="370" y="80">holds: b</text>
+    <text x="370" y="96">waits: a</text>
+
+    <rect x="40" y="140" width="140" height="40" fill="var(--color-surface)" stroke="var(--color-border-strong)" rx="4"/>
+    <text x="50" y="164" fill="var(--color-fg)">mutex a (held by T1)</text>
+
+    <rect x="360" y="140" width="140" height="40" fill="var(--color-surface)" stroke="var(--color-border-strong)" rx="4"/>
+    <text x="370" y="164" fill="var(--color-fg)">mutex b (held by T2)</text>
+
+    <line x1="180" y1="80" x2="360" y2="80" stroke="var(--color-accent)" strokeWidth="1.5" markerEnd="url(#a4)"/>
+    <text x="230" y="70" fill="var(--color-accent)">T1 waits for b</text>
+    <line x1="360" y1="95" x2="180" y2="95" stroke="var(--color-accent)" strokeWidth="1.5" markerEnd="url(#a4)"/>
+    <text x="225" y="112" fill="var(--color-accent)">T2 waits for a</text>
+
+    <defs><marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-accent)"/></marker></defs>
+  </g>
+</svg>
+</Diagram>
+
+## The four conditions — break one to prevent
+
+Coffman, Elphick, and Shoshani (1971) characterized deadlock as the
+coincidence of four conditions. Remove any one and deadlock is
+impossible:
+
+<MemoryOrdering
+  ordering="Coffman conditions"
+  caption="Each row names one of the four simultaneously-required conditions and what its removal costs you."
+>
+  <MOPair from="Mutual exclusion" to="break it" allowed="no" note="lock-free / RCU / immutable data — this whole book" />
+  <MOPair from="Hold-and-wait" to="break it" allowed="no" note="take all locks up front (two-phase locking), or take none" />
+  <MOPair from="No preemption" to="break it" allowed="no" note="try-lock with timeout and back off" />
+  <MOPair from="Circular wait" to="break it" allowed="no" note="global lock order — the usual practical choice" />
+</MemoryOrdering>
+
+In practice, only the last one is cheap to enforce. Mutual exclusion
+is the whole point of a mutex. Hold-and-wait elimination means
+acquiring all locks at once — fine for two, unworkable for ten. No
+preemption means switching to `pthread_mutex_trylock` and handling
+failure everywhere, which bloats every call site.
+
+**Global lock order** is the conventional fix.
+
+## Address-ordered locking
+
+Pick a total order over all locks that might be acquired together.
+Every thread takes them in that order, never out of order. The
+classical fix for the AB/BA pattern:
+
+<Snippet file="04-lockorder.c" stripHeader />
+
+`lock_both` sorts the two mutex pointers by address before acquiring.
+Both threads — whether they "intended" AB or BA — end up taking the
+lower-addressed lock first. No cycle in the wait graph can form.
+
+Running it:
+
+```
+$ ./build/04-lockorder
+ok — 1000000 rounds without deadlock
+```
+
+<Aside variant="note" title="What about 'always lock in the order they appear in the struct'?">
+That works for one struct, but not for functions that operate on
+*two* instances of the struct (e.g., `transfer(account *from, account *to)`).
+A called with `(X, Y)` and a concurrent B called with `(Y, X)` gives
+you the same AB/BA problem. Address-ordered locking — or another
+canonical order like "smaller account id first" — is what you need.
+</Aside>
+
+### What to do when you can't use address ordering
+
+Sometimes the lock hierarchy is not a total order — e.g., a parent
+node in a tree and some arbitrary descendant. The usual tools:
+
+1. **`pthread_mutex_trylock` + retry.** If the second acquisition
+   fails, drop the first lock and start over. This trades
+   determinism for forward progress and can livelock (see below).
+2. **Hand-over-hand** (lock coupling): hold lock on node X, acquire
+   lock on X.next, then release lock on X. Never hold two unrelated
+   locks at once. Used in linked-list mutation.
+3. **A single bigger lock.** Correct, slow. Sometimes the right
+   call — don't assume fine-grained is always better.
+
+## Livelock
+
+With `trylock`, two "polite" threads can back off in lockstep and
+make no progress:
+
+```c
+/* a well-intentioned but lethal retry pattern */
+for (;;) {
+    pthread_mutex_lock(&first);
+    if (pthread_mutex_trylock(&second) == 0) break;
+    pthread_mutex_unlock(&first);
+    /* try the other order next time */
+    pthread_mutex_lock(&second);
+    if (pthread_mutex_trylock(&first) == 0) break;
+    pthread_mutex_unlock(&second);
+}
+```
+
+Both threads perpetually grab one lock, fail to grab the other, drop
+the first, switch, repeat. CPU is pegged; work isn't getting done.
+**This is livelock.** The fix is *randomized* backoff between
+retries: a brief, jittered sleep that desynchronizes the threads.
+Even a few microseconds is enough.
+
+## Priority inversion
+
+Run three threads at three priorities: low (L), medium (M), high (H).
+L holds mutex `mu`. H tries to lock `mu` and blocks waiting for L.
+M — which does not touch `mu` at all — wakes up and preempts L,
+because M is higher priority than L. L cannot run, cannot release
+`mu`, and H — the *highest*-priority thread in the system — sits
+blocked indefinitely behind **M**, a thread that has nothing to do
+with the lock. This is **priority inversion**.
+
+The Mars Pathfinder lander hit this in 1997; watchdog resets that
+looked random turned out to be a high-priority bus manager starving
+behind a medium-priority metadata task.
+
+<Diagram alt="Timeline: L acquires mu. H wakes and tries to acquire mu, blocks. M, which has nothing to do with mu, wakes and preempts L. L cannot run. H is indirectly blocked by M even though M does not hold the mutex.">
+<svg width="640" height="200" viewBox="0 0 640 200" xmlns="http://www.w3.org/2000/svg" fontFamily="var(--font-mono)" fontSize="11">
+  <g fill="var(--color-fg)">
+    <text x="10" y="30" fill="var(--color-fg-muted)">L (low)</text>
+    <text x="10" y="90" fill="var(--color-fg-muted)">M (med)</text>
+    <text x="10" y="150" fill="var(--color-fg-muted)">H (high)</text>
+
+    <rect x="70" y="15" width="100" height="24" fill="var(--color-accent)" />
+    <text x="78" y="32" fill="var(--color-accent-fg)">lock(mu)</text>
+    <rect x="170" y="15" width="40" height="24" fill="var(--color-accent-muted)" />
+    <text x="176" y="32" fill="var(--color-accent-fg)">work</text>
+    <rect x="330" y="15" width="100" height="24" fill="var(--color-border-strong)" />
+    <text x="338" y="32" fill="var(--color-fg)">blocked (pre-empted)</text>
+    <rect x="550" y="15" width="70" height="24" fill="var(--color-accent-muted)" />
+    <text x="558" y="32" fill="var(--color-accent-fg)">unlock</text>
+
+    <rect x="330" y="75" width="220" height="24" fill="var(--color-warn)" />
+    <text x="338" y="92" fill="#000">M runs — unrelated work</text>
+
+    <rect x="260" y="135" width="290" height="24" fill="var(--color-border-strong)" />
+    <text x="268" y="152" fill="var(--color-fg)">blocked on mu (inversion!)</text>
+    <rect x="550" y="135" width="70" height="24" fill="var(--color-accent)" />
+    <text x="558" y="152" fill="var(--color-accent-fg)">acquire</text>
+
+    <line x1="0" y1="170" x2="640" y2="170" stroke="var(--color-border)"/>
+    <text x="0" y="185" fill="var(--color-fg-muted)" fontSize="10">time →</text>
+  </g>
+</svg>
+</Diagram>
+
+### Priority inheritance
+
+The standard fix is **priority inheritance**: while a higher-priority
+thread is blocked on a mutex, the holder *temporarily inherits* that
+priority for the duration of the hold. L now runs at H's priority,
+preempts M, finishes, releases the lock. Total inversion time drops
+to the critical section's actual duration.
+
+POSIX exposes this via the mutex attribute:
+
+```c
+pthread_mutexattr_t attr;
+pthread_mutexattr_init(&attr);
+pthread_mutexattr_setprotocol(&attr, PTHREAD_PRIO_INHERIT);
+pthread_mutex_init(&mu, &attr);
+pthread_mutexattr_destroy(&attr);
+```
+
+Most real-time kernels set this on by default; general-purpose Linux
+does not, because it costs something on every lock/unlock and most
+user-space programs don't set thread priorities anyway.
+
+## Debugging deadlock
+
+Three practical tools, in order of usefulness:
+
+1. **Attach a debugger and inspect stacks.** A hung program has
+   every thread in `pthread_mutex_lock`. `info threads` +
+   `thread apply all bt` in gdb usually tells you what's blocked
+   on what in seconds.
+2. **TSAN's lock-order tracking.** `-fsanitize=thread` records the
+   order in which every thread acquires mutexes and reports any
+   two threads that take them in conflicting orders — even if no
+   deadlock has yet occurred. Catches AB/BA in CI.
+3. **helgrind.** Valgrind's thread-error detector. Slower than TSAN,
+   but diagnoses cases TSAN misses (e.g., POSIX mutex API misuse).
+
+## Exercises
+
+<Exercise n="1" title="Which Coffman condition does address ordering break?">
+Address-ordered locking makes AB/BA impossible. Which of the four
+Coffman conditions is it breaking?
+
+<Solution>
+**Circular wait.** Holding-and-waiting still happens (a thread holds
+lock A while waiting for lock B). Mutual exclusion and no-preemption
+are untouched. What address ordering prevents is the *cycle*:
+if every thread takes the lower-addressed lock first, the wait graph
+is a DAG rooted at the highest-addressed lock, and a DAG has no
+cycles.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Livelock in the wild">
+The retry pattern in the Livelock section can livelock. Give the
+smallest change that turns it into a correct, progress-guaranteed
+version. Describe the mechanism.
+
+<Hint>
+What if the sleep is random?
+</Hint>
+
+<Solution>
+Add a *randomized* sleep between retries:
+```c
+if (pthread_mutex_trylock(&second) != 0) {
+    pthread_mutex_unlock(&first);
+    usleep(100 + rand() % 900);   /* 0.1 – 1 ms */
+    continue;
+}
+```
+Randomization is the key. A fixed sleep leaves two threads
+perfectly synchronized. A random sleep desynchronizes their retry
+windows, so on some iteration one of them will land in a window
+where the other isn't holding its lock. This is exactly the
+exponential-random-backoff idea used by Ethernet and TCP.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Deadlock in a tree">
+You have a binary tree of nodes, each with its own mutex. A function
+`rotate(parent, child)` needs to hold both locks to splice a rotation.
+Address-ordered locking *is* available — but a developer proposes
+"always lock the parent first because it's semantically the owner."
+Why is this wrong?
+
+<Hint>
+Are there cases where the "child" in one call is the "parent" in
+another concurrent call?
+</Hint>
+
+<Solution>
+In a rebalancing operation, what is a parent now was a child a moment
+ago, and vice versa. Thread A, in the middle of a rotation on nodes
+(X, Y), sees X as parent. Thread B sees them after A's rotation — X
+is now Y's child. B calls `rotate(Y, X)` and locks Y, then wants X,
+while A is holding X wanting Y. Deadlock.
+
+"Semantic" orderings fail whenever the semantic relation is not a
+fixed total order. Address ordering works because addresses are a
+total order that doesn't change mid-operation.
+</Solution>
+</Exercise>
+
+<Exercise n="4" title="Find the inversion">
+A real-time audio app has an audio callback (priority 99), a UI
+thread (priority 50), and a GC thread (priority 10). The audio
+callback allocates a ring-buffer slot from a pool protected by a
+mutex. The GC thread periodically takes the same mutex to compact.
+Where's the priority inversion? How would you avoid it entirely?
+
+<Solution>
+When the GC thread (priority 10) holds the pool mutex and the audio
+callback (priority 99) blocks on it, the UI thread (priority 50) can
+run ahead of GC — audio is now blocked behind UI, which has nothing
+to do with the mutex. Classical inversion.
+
+Two good fixes:
+1. **`PTHREAD_PRIO_INHERIT`** on the pool mutex. Audio's attempted
+   lock boosts GC to 99 for the duration of the hold.
+2. **Don't share a mutex at all.** Audio should allocate from a
+   thread-local pool or a wait-free pool; GC should touch only the
+   non-hot part of the pool. This is almost always the better
+   answer in real-time code: structure the data so the critical path
+   doesn't acquire locks at all.
+</Solution>
+</Exercise>

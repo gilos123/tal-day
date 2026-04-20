@@ -1,0 +1,172 @@
+---
+title: "Memory orderings"
+slug: "07-memory-orderings"
+order: 7
+status: "full"
+summary: "relaxed, acquire, release, acq_rel, seq_cst — what each forbids, and when a weaker ordering is enough."
+tags: ["atomics", "ordering"]
+---
+
+Every atomic operation takes a `memory_order` argument. The default,
+if you don't spell one out, is `memory_order_seq_cst` — the strongest
+and slowest. Knowing when you can weaken it is the main skill this
+lesson is for.
+
+## The full set
+
+| Ordering             | Applies to      | Forbids (beyond relaxed) |
+| -------------------- | --------------- | ------------------------ |
+| `relaxed`            | load / store / RMW | nothing across threads; only per-location modification order |
+| `consume`            | load               | (effectively unused — see below) |
+| `acquire`            | load, CAS failure  | subsequent ops in this thread moving before the load |
+| `release`            | store, CAS success | prior ops in this thread moving after the store |
+| `acq_rel`            | RMW                | both acquire and release semantics |
+| `seq_cst`            | load / store / RMW | any reorder that would break a single total order across all seq_cst ops |
+
+Three things to internalize:
+
+1. **relaxed** still atomic. No torn reads or lost bits. Only the
+   synchronization semantics are stripped.
+2. **acquire** / **release** always come in pairs. A lone `release`
+   synchronizes with nothing.
+3. **seq_cst** gives you a global total order, but *only for
+   operations that themselves use seq_cst*. Mixing seq_cst with weaker
+   orderings on the same variable does not give the mixed operations
+   seq_cst behavior.
+
+Play with the scenario below — the same classic publication pattern
+from lesson 5, with the ordering of the store and load toggleable.
+
+<MemoryOrderingPlayground />
+
+## Where each ordering is the right choice
+
+### Relaxed — counters that no one reads-for-synchronization
+
+A statistics counter that many threads increment and one thread prints
+every few seconds. Nobody blocks on it; nobody makes control-flow
+decisions from it. Use `atomic_fetch_add(&hits, 1, memory_order_relaxed)`.
+You keep per-location modification order (every thread sees the same
+sequence of values for this counter), but you don't pay for any
+cross-location synchronization.
+
+<MemoryOrdering
+  ordering="relaxed"
+  caption="Relaxed preserves only single-location ordering; nothing carries from other locations."
+>
+  <MOPair from="plain write A" to="relaxed store B" allowed="yes" note="no cross-thread effect on A" />
+  <MOPair from="relaxed load C" to="plain read D" allowed="yes" note="no happens-before through C" />
+  <MOPair from="relaxed RMW E" to="relaxed RMW F on same loc" allowed="no" note="per-location modification order is preserved" />
+</MemoryOrdering>
+
+### Release / acquire — publication
+
+The lesson-5 snippet. Use `release` on the store that publishes data,
+`acquire` on the load that consumes the flag. This is by far the most
+common correct ordering for hand-rolled concurrent data structures.
+
+The snippet below takes a flag at runtime and selects either
+release/acquire (safe) or relaxed (unsafe). Run it with and without
+`RELAXED=1` on an ARM machine to see the difference; on x86 the
+hardware is strong enough that even the unsafe version usually appears
+to work, which is precisely the problem.
+
+<Snippet file="07-relaxed-vs-acquire.c" stripHeader />
+
+### acq_rel — RMWs that both publish and observe
+
+A `fetch_add` on a lock-free work-stealing deque's top index is a
+natural `acq_rel`: you publish your claim to the slot (release) and
+need to observe every prior claim (acquire) in one atomic step.
+
+### seq_cst — only when you need a total order
+
+Dekker-like patterns, independent-reads-of-independent-writes (IRIW)
+tests, and single-producer multiple-observer counters where all
+observers must agree on ordering. Most code *doesn't* need it and
+pays substantially (full fence on x86, `dmb ish` on ARM).
+
+<Aside variant="hard" title="consume is broken">
+`memory_order_consume` was intended to express data-dependent
+ordering — cheaper than `acquire` on architectures like POWER where
+the hardware already enforces it. In practice, compilers cannot track
+dependencies correctly and all of them promote `consume` to `acquire`.
+WG14 has discussed removing or replacing it (N3617 and related papers).
+Use `acquire`.
+</Aside>
+
+## A checklist
+
+Before settling on `seq_cst`, ask:
+
+- Do I need a global total order across unrelated atomics? → yes → seq_cst.
+- Does this operation publish or consume data written / read elsewhere? → release / acquire / acq_rel.
+- Is this a standalone counter with no coupling to other variables? → relaxed.
+
+## Exercises
+
+<Exercise n="1" title="Is this relaxed enough?">
+A producer writes `arr[0..N]` then sets `atomic_store(&ready, 1, memory_order_relaxed)`.
+A consumer spins on the flag then reads the array. On ARM, name two
+*specific* things that can go wrong.
+
+<Solution>
+1. The consumer's compiler is free to hoist `arr[i]` reads above the
+   flag-load loop — no atomic ordering forbids it — so the consumer
+   reads uninitialized memory.
+2. Even if the compiler behaves, the CPU can execute the `arr[i]`
+   loads speculatively before the `ready` load retires. With no
+   acquire fence, the CPU is not required to undo those speculations
+   in light of a later flag-load value.
+
+Fix: release on the store, acquire on the load.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Dekker without seq_cst">
+Two flags `a` and `b`. Thread 1: `a = 1; if (b == 0) crit_A();`. Thread
+2: `b = 1; if (a == 0) crit_B();`. Intended invariant: the two
+critical sections are mutually exclusive. If we write `a` and `b` with
+`release` and read them with `acquire`, does mutual exclusion hold?
+
+<Hint>
+Release/acquire gives a partial order, not a total order. What does
+IRIW-style reasoning say about independent writes?
+</Hint>
+
+<Solution>
+No. release/acquire does not prohibit each thread from seeing its own
+store before the other's. Both threads may observe `b == 0` and `a == 0`
+respectively and both enter their critical sections. You need
+`seq_cst` on all four operations to get a single total order that
+forces at least one thread to see the other's store.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Spot the bug">
+```c
+/* ring buffer tail pointer, single-producer, single-consumer */
+void push(T v) {
+    size_t t = atomic_load_explicit(&tail, memory_order_acquire);
+    buf[t] = v;                                              // plain write
+    atomic_store_explicit(&tail, (t + 1) & MASK,
+                          memory_order_relaxed);             // BUG?
+}
+```
+
+What's wrong with the ordering on the store to `tail`?
+
+<Hint>
+What does the consumer use `tail` for?
+</Hint>
+
+<Solution>
+The consumer reads `tail` and then reads `buf[t]`. If the `tail`
+store uses `relaxed`, the consumer's matching acquire sees the new
+`tail` but the compiler/CPU is not required to have `buf[t] = v`
+visible yet. Change it to `memory_order_release`. The `acquire` on
+the load of `tail` is actually unnecessary for the producer itself —
+since only one producer exists, the load could be relaxed — but the
+release on the store is load-bearing for the consumer.
+</Solution>
+</Exercise>

@@ -1,0 +1,167 @@
+---
+title: "The C11 memory model"
+slug: "05-c11-memory-model"
+order: 5
+status: "full"
+summary: "Sequenced-before, happens-before, synchronizes-with. The three relations that define when a read is allowed to see a write."
+tags: ["memory-model", "theory"]
+---
+
+Every correctness argument in concurrent C eventually reduces to one
+question: is there a *happens-before* relation from this write to that
+read? If yes, the read is guaranteed to observe the write (or a later
+write to the same location). If no, the read may observe any write
+that's been performed on the location — or none at all.
+
+The C11 standard defines happens-before in terms of two simpler
+relations: *sequenced-before* within one thread, and *synchronizes-with*
+across threads.
+
+## Sequenced-before
+
+Within a single thread, `sequenced-before` is the intra-thread ordering
+the standard already requires. Every full expression is
+sequenced-before the next; most sub-expression evaluation is
+unsequenced. The rules haven't changed since C99. For our purposes:
+
+> If statement `A` appears before statement `B` in program order within
+> the same thread, `A` is sequenced-before `B`.
+
+That's the easy one.
+
+## Synchronizes-with
+
+This is the heart of the model. Two threads establish a
+`synchronizes-with` edge *only* through specific, named operations:
+- an atomic store with `memory_order_release` to an object synchronizes
+  with an atomic load from the same object that observes the store's
+  value with `memory_order_acquire` (or stronger);
+- acquiring a mutex synchronizes with the most recent unlock of that
+  mutex;
+- `pthread_join` synchronizes with the return from the joined thread;
+- the start of a new thread synchronizes with the `pthread_create`
+  that started it.
+
+No synchronizes-with edge, no cross-thread ordering. That's the entire
+rulebook.
+
+## Happens-before
+
+`happens-before` is the transitive closure of sequenced-before and
+synchronizes-with. If `A happens-before B`, and `B happens-before C`,
+then `A happens-before C`. This closure is what we use to *chain* a
+producer's plain write into a consumer's plain read, through a single
+atomic operation in the middle.
+
+<Diagram alt="Happens-before graph: producer's plain write of data is sequenced-before a release store of ready; consumer's acquire load of ready synchronizes with that release; the consumer's read of data is sequenced-after the load. Transitive closure gives write-of-data happens-before read-of-data.">
+<svg width="620" height="220" viewBox="0 0 620 220" xmlns="http://www.w3.org/2000/svg" fontFamily="var(--font-mono)" fontSize="12">
+  <g fill="var(--color-fg)">
+    <rect x="20" y="20" width="260" height="180" fill="var(--color-surface-2)" stroke="var(--color-border)" rx="4"/>
+    <text x="30" y="40" fill="var(--color-fg-muted)">Thread 1 (producer)</text>
+    <rect x="40" y="60" width="220" height="30" fill="var(--color-surface)" stroke="var(--color-border-strong)"/>
+    <text x="50" y="79">data = 42;</text>
+    <text x="50" y="110" fill="var(--color-fg-muted)">sequenced-before</text>
+    <rect x="40" y="130" width="220" height="40" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="50" y="148">atomic_store(&amp;ready, 1,</text>
+    <text x="50" y="162">  memory_order_release);</text>
+
+    <rect x="340" y="20" width="260" height="180" fill="var(--color-surface-2)" stroke="var(--color-border)" rx="4"/>
+    <text x="350" y="40" fill="var(--color-fg-muted)">Thread 2 (consumer)</text>
+    <rect x="360" y="60" width="220" height="40" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="370" y="78">atomic_load(&amp;ready,</text>
+    <text x="370" y="92">  memory_order_acquire) == 1</text>
+    <text x="370" y="120" fill="var(--color-fg-muted)">sequenced-before</text>
+    <rect x="360" y="140" width="220" height="30" fill="var(--color-surface)" stroke="var(--color-border-strong)"/>
+    <text x="370" y="159">assert(data == 42);</text>
+
+    <line x1="260" y1="150" x2="360" y2="80" stroke="var(--color-accent)" strokeWidth="2" markerEnd="url(#arr)"/>
+    <text x="275" y="110" fill="var(--color-accent)">synchronizes-with</text>
+    <defs>
+      <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0,0 L10,5 L0,10 z" fill="var(--color-accent)"/>
+      </marker>
+    </defs>
+  </g>
+</svg>
+</Diagram>
+
+The snippet below is this diagram as runnable C. Because the release
+synchronizes-with the matching acquire *only when the acquire observes
+the value stored by the release*, the consumer's busy-wait is not just
+a convenience — it's what establishes the edge.
+
+<Snippet file="05-happens-before.c" stripHeader />
+
+## Data race, defined
+
+C11 defines a *data race* precisely:
+
+> Two accesses conflict if they are to the same memory location and at
+> least one is a write. A program contains a data race if it contains
+> two conflicting actions in different threads, at least one of which
+> is not atomic, and neither happens-before the other.
+
+A data-race-free program executes *as if* the implementation picked a
+single total interleaving of each thread's operations consistent with
+happens-before. This is called the *DRF-SC guarantee*: if you have no
+data races, you get sequential consistency for free. All the ordering
+hair-splitting in the next two lessons only matters for programs that
+use atomics to *avoid* a data race while doing something more
+interesting than locking.
+
+<Aside variant="warning" title="What 'undefined' actually means">
+A program with a data race is not "might return the wrong answer." It
+is *undefined behavior*. The compiler has already assumed it won't
+happen, and will optimize accordingly: a plain non-atomic loop reading
+a shared flag can be hoisted into a register, so even adding
+`sched_yield()` to the body won't save you. See exercise 2 of lesson 1.
+</Aside>
+
+## Exercises
+
+<Exercise n="1" title="Where is the synchronizes-with?">
+In `05-happens-before.c`, point to the exact pair of operations
+between which a synchronizes-with edge is established. What would
+break the edge?
+
+<Solution>
+The `atomic_store_explicit(&ready, 1, memory_order_release)` in the
+producer, and the *successful* `atomic_load_explicit(&ready, memory_order_acquire) == 1`
+in the consumer. The edge requires (a) both ends to use an ordering
+at least release / acquire, and (b) the acquire to observe a value
+*stored by that release* (or by a later release in the release sequence).
+If either ordering is weakened to relaxed, the edge vanishes.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Transitive closure">
+Thread A writes `x = 1`, then releases mutex M. Thread B acquires M,
+reads `x`, then releases mutex N. Thread C acquires N, reads `x`.
+Does `C` necessarily observe `x == 1`?
+
+<Hint>
+Chain the synchronizes-with edges from unlocks to matching locks.
+</Hint>
+
+<Solution>
+Yes. A's unlock-of-M synchronizes with B's lock-of-M. B's unlock-of-N
+synchronizes with C's lock-of-N. Sequenced-before inside each thread
+glues these together. The transitive closure produces
+`A's write of x` happens-before `C's read of x`. C must observe 1 (or
+a later value).
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="No synchronization">
+Two threads, no atomics, no locks. Thread A does `x = 1; y = 2;` and
+Thread B does `a = y; b = x;`. Under what values of `(a, b)` is there
+a data race?
+
+<Solution>
+Any execution is a data race, because x and y are written by A and
+read by B with no happens-before relation between the accesses. The
+question of observed values is undefined. Note that this is why
+Dekker-style mutual exclusion over plain ints is impossible in modern
+C — the atomics and fences in lessons 6–7 aren't optional.
+</Solution>
+</Exercise>

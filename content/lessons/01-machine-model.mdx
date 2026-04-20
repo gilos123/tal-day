@@ -1,0 +1,227 @@
+---
+title: "The machine model"
+slug: "01-machine-model"
+order: 1
+status: "full"
+summary: "Threads, cores, caches. Why a program with a single shared integer is already enough to show that concurrency is hard."
+tags: ["fundamentals", "hardware"]
+---
+
+A *thread* is an execution context: a program counter, a register file,
+a stack, sharing one address space with every other thread in the
+process. That's it. On Unix, the C library's thread type is
+`pthread_t`, created with `pthread_create` and joined with `pthread_join`.
+
+A modern CPU has several physical cores. Each core has its own L1
+cache — typically 32–64 KB — and most of them share an L2 or L3
+further up. When two threads run on two cores, they can literally
+execute instructions at the same instant, on different copies of the
+same memory.
+
+Everything surprising about concurrency falls out of those two facts.
+
+## A program that is already broken
+
+Below: two threads, each incrementing a shared counter one million
+times. We expect 2,000,000. We won't get it.
+
+<Snippet file="01-race.c" stripHeader />
+
+On my laptop I get values like 1,042,117 or 1,734,552 — never the same
+twice, and never 2,000,000. ThreadSanitizer (built into gcc/clang via
+`-fsanitize=thread`) reports a *data race*, which in C11 is undefined
+behavior. The program has no defined final value.
+
+## Why the counter loses updates
+
+`x = x + 1` is not one instruction. It's three:
+
+```c
+load  r0, [x]    // r0 = x
+add   r0, 1      // r0 = r0 + 1
+store [x], r0    // x = r0
+```
+
+Between the `load` and the `store`, another thread can run. If it
+does, both threads read the same value of `x`, both add 1, and the
+second `store` overwrites the first. Net gain: one, not two.
+
+Step through the interleaving below. The "fully interleaved" preset
+shows the worst case — both threads read `x = 0`, both compute `1`,
+both store `1`.
+
+<ThreadInterleaving />
+
+<Aside variant="note" title="What about x++?">
+On some architectures, `x++` on an aligned `int` compiles to a single
+instruction. That makes it *atomic with respect to tearing*, but it's
+still not atomic with respect to *ordering* or *visibility* — nothing
+prevents two cores from executing the same "single instruction"
+concurrently. The C11 standard says any unsynchronized write
+concurrent with another access is undefined. The compiler is
+allowed — and does — miscompile `x++` on a plain `int` in ways that
+give you half-increments.
+</Aside>
+
+## Cores, caches, and the coherence bus
+
+Each core reads and writes through its own L1 data cache, in units
+called *cache lines* (usually 64 bytes). When core 0 writes to
+address `&x`, that write goes to core 0's cache, not directly to
+main memory. If core 1 is also caching `&x`, we have a problem:
+two copies of the same address with different values.
+
+The solution is the *cache coherence protocol*. MESI — the simplest
+widely-deployed version — assigns each cached line one of four
+states on each core:
+
+- **M** (Modified) — this core has the only valid copy, and it's
+  dirty (differs from memory).
+- **E** (Exclusive) — this core has the only valid copy, and it
+  matches memory.
+- **S** (Shared) — several cores have clean, identical copies.
+- **I** (Invalid) — this core has no valid copy.
+
+When a core wants to write a line in `S` state, it must first
+*invalidate* every other sharer. That message crosses the coherence
+bus. That round trip — hundreds of cycles on a modern machine — is
+why concurrent writes to the same cache line are thousands of times
+slower than independent writes.
+
+<Diagram alt="Two cores, each with its own L1 cache, connected by a coherence bus to main memory.">
+<svg width="540" height="240" viewBox="0 0 540 240" xmlns="http://www.w3.org/2000/svg">
+  <g fontFamily="var(--font-mono)" fontSize="12" fill="var(--color-fg)">
+    <rect x="20" y="20" width="180" height="80" fill="var(--color-surface-2)" stroke="var(--color-border-strong)" rx="4"/>
+    <text x="30" y="40" fill="var(--color-fg-muted)">Core 0</text>
+    <text x="30" y="62">registers</text>
+    <rect x="30" y="70" width="160" height="20" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="40" y="84" fill="var(--color-fg-muted)">L1 cache · 64B lines</text>
+
+    <rect x="340" y="20" width="180" height="80" fill="var(--color-surface-2)" stroke="var(--color-border-strong)" rx="4"/>
+    <text x="350" y="40" fill="var(--color-fg-muted)">Core 1</text>
+    <text x="350" y="62">registers</text>
+    <rect x="350" y="70" width="160" height="20" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="360" y="84" fill="var(--color-fg-muted)">L1 cache · 64B lines</text>
+
+    <rect x="20" y="150" width="500" height="60" fill="var(--color-surface)" stroke="var(--color-border)" rx="4"/>
+    <text x="30" y="170" fill="var(--color-fg-muted)">Main memory (DRAM)</text>
+    <text x="30" y="192">hundreds of cycles away</text>
+
+    <line x1="110" y1="100" x2="110" y2="150" stroke="var(--color-accent)" strokeWidth="1.5"/>
+    <line x1="430" y1="100" x2="430" y2="150" stroke="var(--color-accent)" strokeWidth="1.5"/>
+    <line x1="110" y1="125" x2="430" y2="125" stroke="var(--color-accent)" strokeWidth="1.5" strokeDasharray="3,3"/>
+    <text x="220" y="120" fill="var(--color-accent)">coherence bus</text>
+  </g>
+</svg>
+</Diagram>
+
+Walk through a MESI scenario: both cores start cold, then read,
+then one writes, then the other reads, then the other writes. Watch
+the states transition.
+
+<CacheCoherence />
+
+<Aside variant="hard" title="False sharing">
+Two variables that live on the same 64-byte cache line are, from the
+coherence protocol's point of view, the same variable. Two threads
+each updating their "own" counter will still ping that line back and
+forth between cores — a phenomenon called *false sharing*. A
+`char pad[64]` between counters can easily make a benchmark ten
+times faster. We'll measure this in lesson 20.
+</Aside>
+
+## Why "just lock it" is not the answer to this lesson
+
+You already know the fix for the counter: wrap the increment in a
+mutex. That works. But a mutex is built out of primitives — atomic
+compare-and-swap, memory fences, blocking via a kernel futex — that
+we haven't introduced yet. Before we use the high-level tool, we need
+to understand what the tool is made of, and *why* it works.
+
+The next few lessons build up that foundation: `pthread` basics,
+mutexes and condition variables, deadlock patterns, and then — the
+hard part — the C11 memory model itself.
+
+## Exercises
+
+<Exercise n="1" title="Predict the output distribution">
+On an x86 laptop with two threads each executing `x++` on a plain `long`
+one million times, will the final value be (a) always exactly 2,000,000,
+(b) always less than 2,000,000, or (c) sometimes less, sometimes
+exactly 2,000,000? Justify your answer in terms of interleavings.
+
+<Hint>
+Can both threads observe the same `x` in their `load`? When would
+they not? How wide is the window between `load` and `store`?
+</Hint>
+
+<Solution>
+(c). If the OS happens to schedule thread A entirely before thread B,
+or if their `load`/`store` windows never overlap, you get 2,000,000.
+This is rare but real — especially on single-core machines or under
+heavy external load — and it's exactly what makes the bug so
+insidious: it passes in CI sometimes.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Find the race">
+Consider:
+
+```c
+int shared = 0;
+
+void *reader(void *_) {
+    while (shared == 0) { /* spin */ }
+    printf("got %d\n", shared);
+    return NULL;
+}
+
+void *writer(void *_) {
+    shared = 42;
+    return NULL;
+}
+```
+
+The reader and writer both touch `shared` without synchronization.
+Give *two distinct* ways the reader can fail to ever observe 42,
+even though the writer completed.
+
+<Hint>
+One is at the compiler level; the other is at the hardware level.
+</Hint>
+
+<Solution>
+1. **The compiler can hoist the read.** Nothing in the loop body
+   modifies `shared`, so the optimizer is free to load `shared` once
+   outside the loop and spin on a register. No amount of writer
+   activity will change the register.
+2. **The CPU's store buffer can delay the write.** On a weakly-ordered
+   machine, the writer's `store` sits in its local buffer and is
+   visible to the reader only once the buffer drains. Without any
+   synchronization the drain is not obligated to happen.
+
+Both are defended against by making `shared` an `atomic_int` and
+using appropriate memory orderings — lessons 5–7.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Without a mutex">
+Modify `01-race.c` to produce the correct final value of 2,000,000 —
+without using `pthread_mutex_lock` or `pthread_spin_lock`. (You may
+assume the existence of atomic operations; you'll see their formal
+definitions in lessons 5–7.) Specifically, which single line do you
+change?
+
+<Hint>
+`stdatomic.h`. Replace the type of `x`.
+</Hint>
+
+<Solution>
+Change `static long x = 0;` to `static atomic_long x = 0;`, and
+replace `x = x + 1;` with `atomic_fetch_add(&x, 1);`. The default
+ordering (`seq_cst`) is strong enough that every increment becomes
+visible to the other thread. You'll see exactly this minimal fix
+again in lesson 6, and lesson 7 explores whether a weaker ordering
+would suffice.
+</Solution>
+</Exercise>

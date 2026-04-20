@@ -1,0 +1,18 @@
+---
+title: "Hardware memory models"
+slug: "08-hardware-models"
+order: 8
+status: "stub"
+summary: "x86-TSO vs ARM/POWER weak ordering. What the hardware actually promises, and why code that works on your laptop crashes on the server."
+tags: ["hardware", "memory-model"]
+---
+
+## What this lesson will cover
+
+- x86-TSO (Total Store Ordering): stores are ordered; only store→load reordering is allowed (via the store buffer).
+- ARM (AArch64) weak ordering: any reorder allowed unless a barrier forbids it.
+- POWER: even weaker — address dependencies don't always order loads.
+- Why `smp_mb()`, `dmb ish`, `hwsync` exist and where C11 atomics emit them.
+- IRIW (Independent Reads of Independent Writes) as the defining test.
+
+<Aside variant="note">Coming soon.</Aside>

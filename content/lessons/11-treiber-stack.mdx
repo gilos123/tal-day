@@ -1,0 +1,221 @@
+---
+title: "Treiber stack"
+slug: "11-treiber-stack"
+order: 11
+status: "full"
+summary: "The 'hello world' of lock-free: a LIFO whose push and pop are each a CAS loop on a single pointer. Everything that makes lock-free hard fits inside its forty lines."
+tags: ["lock-free", "stack", "cas"]
+---
+
+A *Treiber stack* is a singly-linked list used as a LIFO, with a
+single atomic pointer to the head. `push` installs a new node as head;
+`pop` takes the current head and advances the pointer to `head->next`.
+Both operations are a compare-and-swap loop — no locks, no waiting.
+
+It's the simplest non-trivial lock-free data structure. It also
+exposes every pitfall we'll spend the next four lessons dealing with:
+memory ordering, ABA, reclamation. Read it slowly.
+
+## The code
+
+<Snippet file="11-treiber.c" stripHeader />
+
+Two things are going on.
+
+In `push`, the CAS is in release mode on success. The new node's
+fields (`value`, `next`) were set by plain stores before the CAS. The
+release publishes them — a matching `acquire` pop will see a fully
+initialized node.
+
+In `pop`, the CAS is in acquire mode. It loads the head, and any
+stores that were release-published to that head (by the corresponding
+push) are now visible. The failure ordering is also acquire: on retry
+we need to see the current head coherently.
+
+<Aside variant="note" title="Why not seq_cst?">
+Default `compare_exchange_strong` uses `seq_cst`, which is fine and
+conservative. But nothing about Treiber requires a total order across
+*all* CASes — only that each individual push/pop sees a consistent
+chain. Release/acquire is the minimum that works and is measurably
+cheaper on ARM.
+</Aside>
+
+## Walking through a push and a pop
+
+Use the visualizer below. Start from the default three-element stack.
+Push a new value: watch `oldHead` snapshot, watch the new node's
+`next` point into the snapshot, watch the CAS commit. Then pop: watch
+`oldHead` snapshot again, watch `newHead` read from `oldHead->next`,
+watch the CAS commit.
+
+At `cas-ok` during pop, pause and ask: *can we free `oldHead` right
+now?* Another thread may be in the middle of its own pop holding
+`oldHead` as its snapshot, about to dereference `oldHead->next`. Free
+it and that thread chases a freed pointer. This is the reclamation
+problem, lesson 15.
+
+<TreiberStackViz />
+
+## Contention behavior
+
+Under low contention, push and pop are essentially free — one CAS each.
+Under high contention, every thread's CAS except one fails per round,
+and each failure triggers a re-read of the head and a retry. This is
+still *lock-free* (the system as a whole makes progress), but not
+*wait-free* (no per-thread bound on retries). On a heavily contended
+stack, throughput degrades with roughly the square of the thread
+count. The `backoff on failure` trick — sleep for a few nanoseconds
+after a failed CAS — is usually measurable; lesson 20 does the numbers.
+
+## A critical bug we leave unfixed
+
+`11-treiber.c` deliberately never calls `free`. If it did, and two
+threads executed `pop` simultaneously, one could `free` a node that
+the other is about to dereference as `old->next`. The other thread
+would then read garbage and install it as head. Segfault at best,
+corruption at worst.
+
+The canonical patches — hazard pointers, epoch-based reclamation, RCU
+— are lesson 15. For now, internalize that a correct Treiber stack is
+*not* the forty lines above: it's those forty lines plus a nontrivial
+reclamation scheme.
+
+The companion bug, even if you could free safely, is called *ABA* and
+is lesson 12.
+
+## Exercises
+
+<Exercise n="1" title="Minimum orderings">
+The snippet uses `memory_order_release` on the successful push CAS and
+`memory_order_acquire` on the successful pop CAS. Could the push's
+*failure* ordering be weakened to `memory_order_relaxed`? Justify.
+
+<Hint>
+On CAS failure, what has the calling thread already done that must be
+visible to other threads?
+</Hint>
+
+<Solution>
+Yes. On a failed push CAS, the thread has *not* successfully published
+its new node, so no release semantics are needed. `expected` is simply
+updated to the observed head and the loop retries. The relaxed load
+is sufficient for this re-read — the retry's next CAS will acquire /
+release appropriately. This is exactly what the snippet does.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Find the bug">
+Consider this "simplified" pop:
+
+```c
+static int pop_broken(int *out) {
+    node_t *old = atomic_load_explicit(&head, memory_order_acquire);
+    if (old == NULL) return 0;
+    node_t *new_head = old->next;
+    atomic_store_explicit(&head, new_head, memory_order_release);
+    *out = old->value;
+    return 1;
+}
+```
+
+The author has removed the CAS and replaced it with a plain
+release-store. On x86 with one consumer thread, this appears to work.
+Give *two distinct* scenarios under which it breaks.
+
+<Hint>
+What if two threads run `pop_broken` at once? What if one `pop_broken`
+races with a `push`?
+</Hint>
+
+<Solution>
+1. **Concurrent pops.** Two threads load `old = head` (both see the
+   same head), both set `new_head = old->next`, both store
+   `new_head` into head. The second store is redundant; both threads
+   now return the *same* value, and one element is silently dropped
+   from the stack.
+2. **Pop vs push race.** Thread A loads `old`. Thread B pushes a new
+   node, so head is now `new_top`. Thread A proceeds to store
+   `old->next` into head, clobbering `new_top`. The newly pushed
+   element is lost.
+
+Only a CAS on head prevents both: it asserts that no one has touched
+head since our snapshot.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Stack size counter">
+You want a lock-free `size()` that returns the approximate number of
+elements. Add an `atomic_long count` updated on every push and pop.
+What ordering should the counter use, and why is this counter always
+"approximate" regardless of ordering?
+
+<Hint>
+The count and the stack contents are two separate locations. Even
+under seq_cst, can you make a snapshot of both?
+</Hint>
+
+<Solution>
+`memory_order_relaxed` is fine — the counter is not used for
+synchronization. Use `atomic_fetch_add(&count, 1, relaxed)` on push,
+`atomic_fetch_sub(&count, 1, relaxed)` on pop.
+
+It's approximate because `size()` cannot atomically observe both the
+counter and the stack head together. Between reading the counter and
+reading head, arbitrary numbers of pushes/pops can happen. Even
+`seq_cst` wouldn't help — total order gives you a consistent view of
+one operation at a time, not a consistent snapshot of two locations.
+This is why real concurrent data structures expose either an exact
+count (single global atomic that *is* the data structure's only
+state) or a bounded-staleness count, never a cheap exact size of
+multi-location structures.
+</Solution>
+</Exercise>
+
+<Exercise n="4" title="Bounded stack">
+Extend the Treiber stack to a *bounded* stack of capacity N: push
+fails if already at N elements. Sketch the algorithm. What ordering
+does the capacity check need?
+
+<Hint>
+Combine the capacity counter with the CAS. Can the check and the CAS
+be one atomic step?
+</Hint>
+
+<Solution>
+Maintain an `atomic_long depth`. On push:
+1. `old_depth = atomic_load(&depth, relaxed)`
+2. If `old_depth >= N`, return FULL.
+3. Attempt `atomic_compare_exchange_weak(&depth, &old_depth, old_depth + 1, acq_rel, relaxed)`.
+   On failure (someone else changed depth), re-evaluate from step 2.
+4. On success, perform the normal Treiber push-CAS on `head`.
+5. If the head CAS loop can truly spin forever, you'd want to
+   decrement `depth` on abandon — but under lock-freedom the head CAS
+   will succeed in a bounded number of retries in any non-pathological
+   schedule. Realistic implementations accept tiny over-counts and
+   reconcile in `size()`.
+
+Capacity check needs `acq_rel` on the depth CAS so the depth increment
+publishes before any consumer acts on the stack's new shape.
+</Solution>
+</Exercise>
+
+<Exercise n="5" title="Why weak, not strong?">
+Both push and pop use `atomic_compare_exchange_weak`. Why not
+`_strong`? When would `_strong` be the right choice?
+
+<Hint>
+What does "spurious failure" cost inside a retry loop?
+</Hint>
+
+<Solution>
+Inside the retry loop, a spurious failure is essentially free: we
+loop back, re-read, retry. The cost of `_strong` on LL/SC hardware
+(ARM, POWER) is an extra inner retry inside the primitive itself,
+which is wasted work when our outer loop would retry anyway.
+
+`_strong` makes sense in a single-shot CAS with no retry — for
+example, `set_once` from lesson 6's exercise 2, or any "claim this
+slot once" pattern. There, a spurious failure returns the wrong
+answer because the caller doesn't retry.
+</Solution>
+</Exercise>

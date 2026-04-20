@@ -1,0 +1,319 @@
+---
+title: "Processes, threads, and pthreads"
+slug: "02-pthreads"
+order: 2
+status: "full"
+summary: "What a thread actually is — as distinct from a process — and the six pthread calls that let you create one, give it work, and wait for its result."
+tags: ["pthreads", "fundamentals"]
+---
+
+Before we touch any synchronization primitive, we need two things to
+be clear in your head: *what a thread is*, and *what a pthread call
+gives you*. Most concurrency bugs trace back to a confused answer to
+one of these.
+
+## Processes vs threads
+
+A **process** is an isolated unit of execution with its own address
+space. Two processes can't directly read each other's memory. Creating
+one (`fork`) duplicates every page (copy-on-write) and sets up a fresh
+set of file descriptors. Communication requires the kernel: pipes,
+sockets, shared memory segments.
+
+A **thread** is a lightweight execution context *inside* a process.
+All threads in a process share the same address space, the same open
+files, the same `malloc` heap. Creating one just allocates a stack, a
+kernel task, and some bookkeeping — no page table duplication.
+
+<Diagram alt="Side by side: a process contains one address space, one heap, and one or more threads. Two processes have two separate address spaces and communicate only via the kernel.">
+<svg width="680" height="280" viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg" fontFamily="var(--font-mono)" fontSize="12">
+  <g fill="var(--color-fg)">
+    <text x="10" y="20" fill="var(--color-fg-muted)">One process, three threads</text>
+    <rect x="10" y="30" width="300" height="230" fill="var(--color-surface-2)" stroke="var(--color-border)" rx="4"/>
+    <rect x="30" y="50" width="260" height="40" fill="var(--color-surface)" stroke="var(--color-border-strong)"/>
+    <text x="40" y="75">shared heap · code · globals · FDs</text>
+    <rect x="30" y="110" width="80" height="130" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="40" y="130" fill="var(--color-fg-muted)">thread 0</text>
+    <text x="40" y="152">stack</text>
+    <text x="40" y="174">regs</text>
+    <text x="40" y="196">pc</text>
+    <rect x="120" y="110" width="80" height="130" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="130" y="130" fill="var(--color-fg-muted)">thread 1</text>
+    <text x="130" y="152">stack</text>
+    <text x="130" y="174">regs</text>
+    <text x="130" y="196">pc</text>
+    <rect x="210" y="110" width="80" height="130" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="220" y="130" fill="var(--color-fg-muted)">thread 2</text>
+    <text x="220" y="152">stack</text>
+    <text x="220" y="174">regs</text>
+    <text x="220" y="196">pc</text>
+
+    <text x="340" y="20" fill="var(--color-fg-muted)">Two processes, one thread each</text>
+    <rect x="340" y="30" width="150" height="230" fill="var(--color-surface-2)" stroke="var(--color-border)" rx="4"/>
+    <rect x="360" y="50" width="110" height="40" fill="var(--color-surface)" stroke="var(--color-border-strong)"/>
+    <text x="370" y="75">own heap, code, FDs</text>
+    <rect x="360" y="110" width="110" height="130" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="370" y="130" fill="var(--color-fg-muted)">thread 0</text>
+    <text x="370" y="152">stack</text>
+
+    <rect x="510" y="30" width="150" height="230" fill="var(--color-surface-2)" stroke="var(--color-border)" rx="4"/>
+    <rect x="530" y="50" width="110" height="40" fill="var(--color-surface)" stroke="var(--color-border-strong)"/>
+    <text x="540" y="75">own heap, code, FDs</text>
+    <rect x="530" y="110" width="110" height="130" fill="var(--color-surface)" stroke="var(--color-accent)"/>
+    <text x="540" y="130" fill="var(--color-fg-muted)">thread 0</text>
+    <text x="540" y="152">stack</text>
+
+    <line x1="490" y1="140" x2="510" y2="140" stroke="var(--color-accent-muted)" strokeDasharray="3,3"/>
+    <text x="493" y="135" fill="var(--color-fg-muted)" fontSize="10">kernel</text>
+    <text x="493" y="150" fill="var(--color-fg-muted)" fontSize="10">IPC only</text>
+  </g>
+</svg>
+</Diagram>
+
+A compact comparison:
+
+| Dimension                 | Process                            | Thread                                     |
+| ------------------------- | ---------------------------------- | ------------------------------------------ |
+| Address space             | private                            | shared with every other thread             |
+| Creation cost             | expensive — fork, COW, new PID     | cheap — one page or two for stack, new TID |
+| Default communication     | IPC (pipes, sockets, shm)          | plain memory reads / writes                |
+| Crash blast radius        | killed process alone               | takes the whole process down               |
+| Default fault isolation   | segfault in one ≠ segfault in other | one thread's wild pointer corrupts all    |
+| Preferred when            | strong isolation, separate programs| tight data sharing, parallelism            |
+
+Threads are the tool we need because concurrency in C is almost always
+about *shared memory*. A producer and consumer communicating through a
+ring buffer is much simpler (and faster) as two threads in one process
+than as two processes with a shared-memory segment.
+
+The trade-off is what the rest of this course is about: when every
+thread can touch every byte, "touch" must be synchronized, and the
+synchronization rules are not obvious.
+
+## The pthread API in six calls
+
+Nearly every program in this course uses this subset:
+
+```c
+int  pthread_create(pthread_t *tid, const pthread_attr_t *attr,
+                    void *(*start)(void *), void *arg);
+int  pthread_join(pthread_t tid, void **retval);
+int  pthread_detach(pthread_t tid);
+void pthread_exit(void *retval) __attribute__((noreturn));
+pthread_t pthread_self(void);
+int  pthread_equal(pthread_t a, pthread_t b);
+```
+
+All of these return 0 on success and an *errno value* (not −1) on
+failure. Do not use `errno` to check pthreads errors — read the
+return value.
+
+## Create and join
+
+The two calls you use in 95% of code:
+
+<Snippet file="02-create-join.c" stripHeader />
+
+Walking through what happens:
+
+- `pthread_create` allocates a stack (8 MB by default on glibc, 512 KB
+  on macOS), starts a kernel task, and calls `worker` with `arg`.
+- The new thread runs until `worker` returns or calls
+  `pthread_exit`. Its return value is buffered inside the pthread
+  struct until someone joins it.
+- `pthread_join` blocks until the target thread has returned, then
+  copies its return value into `*retval`. It also establishes a
+  **synchronizes-with** edge — every write the joined thread did
+  before returning is visible to us after join.
+
+<Aside variant="hard" title="Returning a pointer from a thread">
+`pthread_join`'s `retval` is `void **`, which tempts beginners to
+return a pointer to a local in the worker:
+```c
+int local = 42;
+return &local;   /* DANGLING — local is on the dying stack */
+```
+The stack is freed the instant the worker returns. Either return a
+small integer cast to `void *` (what the snippet does), return
+storage malloc'd by the worker that the joiner frees, or store the
+result in a shared buffer keyed by thread id.
+</Aside>
+
+## Passing arguments: the classic footgun
+
+Here is the wrong way to start N threads — and it looks right:
+
+<Snippet file="02-args-footgun.c" stripHeader />
+
+Every thread receives the *same* `&i`. The scheduler decides when
+each thread reads it. By the time the first thread gets around to
+`*p`, the loop has already run a few more iterations, and `i` holds
+some other value — often all four threads print the same number.
+
+The fix is to give each thread its own storage, as `02-create-join.c`
+does with the `tasks[i]` array. Another common pattern, when all you
+want to pass is a small integer, is to cast it through `void *`:
+
+```c
+pthread_create(&ts[i], NULL, worker, (void *)(long)i);
+/* ... and in the worker: */
+int id = (int)(long)arg;
+```
+
+This is ugly but safe, and the `long` intermediate keeps the compiler
+quiet about pointer-integer width mismatches.
+
+## Detach: fire-and-forget
+
+If you don't care about the return value and don't want to leak a
+pthread struct, mark the thread *detached*. You can do it at creation
+time:
+
+```c
+pthread_attr_t attr;
+pthread_attr_init(&attr);
+pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+pthread_create(&tid, &attr, start, arg);
+pthread_attr_destroy(&attr);
+```
+
+Or after the fact with `pthread_detach(tid)`. A detached thread frees
+its own resources on exit. You cannot join it, and calling
+`pthread_join` on a detached thread is undefined.
+
+This is the right choice for short-lived, independent workers —
+connection handlers in a server, per-request tasks — where tracking
+a thread id is pure bookkeeping overhead. The TCP server in lesson 21
+uses exactly this pattern.
+
+## Thread-local storage
+
+Sometimes every thread needs its own variable. C11 gives you
+`_Thread_local`:
+
+<Snippet file="02-tls.c" stripHeader />
+
+Three threads each increment their *own* `counter` 100,000 times and
+print it. No mutex, no atomic — but no cross-thread visibility
+either, which is exactly what we want. The main thread's `counter`
+stays at zero because main's TLS is independent of the workers'.
+
+TLS is cheap on modern targets: the compiler emits a single thread
+register offset (`%fs` on x86-64, `tpidr_el0` on aarch64). Prefer it
+to `pthread_key_create` / `pthread_setspecific` unless you need
+destructors to run on thread exit (e.g., closing a per-thread file).
+
+<Aside variant="note" title="Stack size is not infinite">
+The default per-thread stack is larger than most programs need (glibc
+8 MB) or smaller than deeply recursive programs need (macOS 512 KB).
+If you spawn thousands of threads and see `EAGAIN` from
+`pthread_create`, you've probably run out of virtual address space.
+`pthread_attr_setstacksize(&attr, 256 * 1024)` fixes it.
+</Aside>
+
+## The shape of everything to come
+
+Every program from this point on follows the same pattern:
+
+1. `pthread_create` N workers.
+2. Workers read / write **shared** memory, coordinated by some
+   synchronization primitive (mutex, condvar, atomic, RCU).
+3. `pthread_join` (or detach + external signal) to wrap up.
+
+The interesting part is step 2. The next three lessons are the three
+classical building blocks: mutexes, condition variables, and the
+deadlock patterns that come with them.
+
+## Exercises
+
+<Exercise n="1" title="Process or thread?">
+You're asked to design a system where one binary serves as both a
+compute engine and a UI. The compute engine occasionally segfaults
+due to numerical edge cases in third-party code. The UI must stay up.
+Should the two live in the same process (as threads) or in two
+processes?
+
+<Solution>
+Two processes. A segfault in one thread takes down every other thread
+in the process, and the UI crashing along with the compute engine
+defeats its whole purpose. The cost is pipe-based IPC — trivial
+compared to the fault-isolation win. This is exactly why Chrome
+isolates renderers as processes, and why databases run the query
+engine in a different process from the web UI.
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Fix the args bug">
+Without using any global state, fix `02-args-footgun.c` so each
+thread reliably sees its own id. Show two different fixes.
+
+<Hint>
+What storage outlives the worker's read of the pointer? And what
+about passing the integer by value through `void *`?
+</Hint>
+
+<Solution>
+**Fix A — per-thread slot:**
+```c
+int ids[N];
+for (int i = 0; i < N; i++) {
+    ids[i] = i;
+    pthread_create(&ts[i], NULL, worker, &ids[i]);
+}
+```
+Each thread gets a distinct address. `ids` lives in `main`'s stack
+and outlives the workers because we join before returning.
+
+**Fix B — pointer-sized cast:**
+```c
+for (int i = 0; i < N; i++) {
+    pthread_create(&ts[i], NULL, worker, (void *)(long)i);
+}
+/* in worker: */
+int id = (int)(long)arg;
+```
+No shared storage at all; the id is packed into the pointer value
+itself. Only works for small integers that fit in `sizeof(void *)`.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Join vs detach">
+You're writing a logging subsystem. One background thread receives
+log records over a queue and writes them to disk. The main program
+flushes once at shutdown. Is the logger thread a candidate for
+`pthread_detach`?
+
+<Hint>
+If the main program exits while the logger is still draining…
+</Hint>
+
+<Solution>
+No. A detached logger can be mid-write when the process exits, and
+you lose the tail of the log. `pthread_join` is the right call — at
+shutdown, enqueue a sentinel, then join. The logger drains, writes
+the last record, returns, and main proceeds to exit. The join edge
+also guarantees the disk write has happened before the process
+terminates.
+
+Detach is for threads whose lifetime is bounded by *external*
+signals (a connection closing, a request completing) and where the
+main thread neither waits for them nor depends on their work being
+done before exit.
+</Solution>
+</Exercise>
+
+<Exercise n="4" title="TLS or arg-passing?">
+In `02-tls.c`, could we replace `_Thread_local long counter` with a
+local variable inside `worker()`? If yes, why use TLS at all?
+
+<Solution>
+For this specific demo, yes — a plain `long counter = 0;` inside
+`worker()` would work identically. TLS is load-bearing when the
+variable is accessed by *other functions* the thread calls —
+logging context, per-thread random-number state, the errno variable
+itself (yes, `errno` is a TLS variable on every modern libc).
+Without TLS you'd have to thread the context through every function
+call or use a hash table keyed by `pthread_self()`, both of which are
+horrible.
+</Solution>
+</Exercise>

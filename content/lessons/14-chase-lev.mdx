@@ -1,0 +1,18 @@
+---
+title: "Chase-Lev work-stealing deque"
+slug: "14-chase-lev"
+order: 14
+status: "stub"
+summary: "The deque used inside every modern task scheduler. Owner pushes and pops one end; thieves steal from the other."
+tags: ["lock-free", "deque", "scheduling"]
+---
+
+## What this lesson will cover
+
+- Asymmetric design: owner uses plain ops + release/acquire; thieves use CAS.
+- The 1-element edge case and how a stale thief signals abort.
+- Circular-buffer-with-version-numbers layout, or the original growable array.
+- Why this is the natural fit for a work-stealing thread pool (lesson 18).
+- Correctness proof sketch via linearizability.
+
+<Aside variant="note">Coming soon.</Aside>

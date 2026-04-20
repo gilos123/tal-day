@@ -1,0 +1,191 @@
+---
+title: "The ABA problem"
+slug: "12-aba"
+order: 12
+status: "full"
+summary: "CAS checks that the pointer is what we last saw. It doesn't check that the world is what we last saw. That gap has a name."
+tags: ["lock-free", "aba", "cas"]
+---
+
+The Treiber stack's correctness proof goes: "my CAS on head compares
+against the snapshot I took; if it succeeds, head hasn't changed since
+my snapshot, so `old->next` is still the right new head."
+
+That argument has a hole. `head` may have changed to something else
+and *changed back*. The pointer compares equal because it's the same
+address, but the node at that address may have been freed, re-allocated,
+and filled with unrelated data. A CAS that passes is not evidence that
+nothing happened — only that, at the instant of the CAS, the pointer
+matches. This is **ABA**.
+
+## A concrete scenario
+
+Initial stack: `head → A → B → C`.
+
+| Time | Thread 1 (victim)                                     | Thread 2 (attacker)                                   |
+|------|-------------------------------------------------------|-------------------------------------------------------|
+| t0   | `snap_head = A; snap_next = B;`                       |                                                       |
+| t1   | *(descheduled)*                                       | `pop()` returns A; head = B                           |
+| t2   |                                                       | `pop()` returns B; head = C; **free(B)**              |
+| t3   |                                                       | `push(A)` — malloc reuses A's address, different data |
+| t4   | resumes: `head == snap_head` (both point to same addr) |                                                       |
+| t5   | `CAS(head, snap_head, snap_next)` — **succeeds**      |                                                       |
+| t6   | head is now a **dangling pointer** into freed B       |                                                       |
+
+The CAS is happy because `head` pointer-equals `snap_head`, but
+`snap_next` points to memory we no longer own. The next pop will
+dereference it; the next push will link through it. The stack is
+corrupted without a single primitive misbehaving.
+
+## The snippet that demonstrates it
+
+<Snippet file="12-aba.c" stripHeader />
+
+The attacker uses `free(b)` followed by a push that reuses `a`'s
+address. This is the simplest deterministic way to engineer ABA:
+allocator address reuse. A glibc allocator is almost guaranteed to
+hand the same address back for an immediate `malloc` of the same size.
+
+Run it under TSAN for a few seconds. Detection is probabilistic
+because we're relying on the freed-node's contents having been
+overwritten; when the allocator hasn't recycled the page yet, the
+bug silently corrupts state instead of visibly printing a message.
+
+## Why this is the canonical lock-free pitfall
+
+Every CAS-based algorithm has a notion of "state I observed." The
+real invariant is not that the *pointer* equals the snapshot, but
+that the *state* hasn't advanced through a sequence that would
+invalidate the dependent reads we plan to make after the CAS.
+
+For the Treiber pop, the dependent read is `old->next`. If between
+our load and our CAS, `old` was popped, freed, and reinstalled, our
+cached `old->next` is stale — possibly dangling. Pointer equality is
+insufficient evidence.
+
+## Patterns that defeat ABA
+
+Three families, in increasing sophistication:
+
+1. **Tagged pointers.** Store the pointer together with a monotonically
+   increasing counter in a single CAS-able word. Each modification
+   bumps the counter, so a pointer-value match requires the counter
+   to have wrapped — and with 64-bit counters, wrap is impossible in
+   practice. Needs double-width CAS (`cmpxchg16b`) or packed
+   pointer-plus-tag on architectures that give you tag bits free.
+2. **Never reuse addresses.** If a node, once popped, is never freed
+   (epoch-based reclamation delays free; hazard pointers preserve it
+   while any thread has a live snapshot), then the attacker cannot
+   push-A-again with the same address. Lesson 15.
+3. **Don't use CAS on pointers.** Some algorithms reformulate to use
+   array indices with sequence counters, or to use a different
+   primitive (LL/SC on ARM is technically ABA-immune because the
+   reservation is lost on any write to the line, not just a
+   value-match; but GCC's `compare_exchange` emits retry logic on top
+   of LL/SC that re-introduces the problem).
+
+### Tagged pointers in C
+
+```c
+typedef struct { node_t *ptr; uintptr_t tag; } __attribute__((aligned(16))) tagged_t;
+
+_Atomic(tagged_t) head;
+
+/* push using 16-byte CAS */
+void push(int v) {
+    node_t *n = malloc(sizeof *n);
+    n->value = v;
+    tagged_t old = atomic_load(&head);
+    tagged_t next;
+    do {
+        n->next = old.ptr;
+        next = (tagged_t){ .ptr = n, .tag = old.tag + 1 };
+    } while (!atomic_compare_exchange_weak(&head, &old, next));
+}
+```
+
+On x86-64, `_Atomic(tagged_t)` of 16 bytes compiles to `lock cmpxchg16b`.
+On 32-bit ARM, pack 30 bits of pointer + 2 bits of tag (using
+alignment) into a 32-bit word; on 64-bit ARM use 48 bits of pointer +
+16 bits of tag. The counter only needs to be large enough that wrap
+is implausible — 16 bits is usually fine because wrap requires 65536
+ABA cycles between one thread's load and its CAS.
+
+<Aside variant="hard" title="This isn't a fix for lifetimes">
+Tagged pointers only close the ABA hole. They do *not* solve the
+reclamation problem: the attacker's `free(b)` in our scenario still
+produced a dangling pointer that the victim was about to dereference
+as `snap_next` *before* the CAS. Even with tags, if the victim does
+`snap_next = snap_head->next` after `snap_head` has been freed, you
+read from freed memory. Tagging fixes the *compare*; reclamation
+fixes the *access*. Most real code needs both.
+</Aside>
+
+## Exercises
+
+<Exercise n="1" title="Minimum reuse">
+In the ABA scenario, the attacker freed B and pushed A. Do we actually
+need the free? Construct a scenario that causes the victim's CAS to
+succeed on a stale snapshot without the attacker freeing anything.
+
+<Hint>
+What if the attacker pops A and then pushes something else that
+happens to reuse A's pointer? What if the attacker only pops once?
+</Hint>
+
+<Solution>
+Suppose the attacker pops A, then pushes a *new* node X whose address
+happens to be the same as A's. This requires the allocator to hand
+back A's address on the next `malloc`, which it often does. No `free`
+is needed because the original A is still live and now "owned" by the
+attacker. Between pop and push, the allocator recycled the memory
+via its normal paths. The victim's CAS on head sees the reused
+pointer value, succeeds, and installs `snap_next` which is B (already
+popped, possibly freed by other code, or reassigned via further
+pops).
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Why tags suffice">
+With a 64-bit tag incremented on every successful CAS, why can we
+effectively treat ABA as impossible? What workload could defeat this
+in principle?
+
+<Hint>
+How many CASes per second can a 4 GHz CPU do?
+</Hint>
+
+<Solution>
+2<sup>64</sup> is roughly 1.8 × 10<sup>19</sup>. Even at one CAS per
+nanosecond sustained, that's ~600 years. No realistic workload wraps
+it. In principle you could defeat it by contriving exactly
+2<sup>64</sup> interleaved pushes and pops between one thread's load
+and its CAS — but that requires that thread to be blocked for
+centuries. Not a threat model.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Which algorithms care?">
+Does ABA affect an `atomic_fetch_add(&counter, 1)`? Does it affect a
+`compare_exchange` on an `atomic_int` that tracks a sequence number?
+What's the pattern for when ABA is a problem?
+
+<Hint>
+What do we do with the value after the CAS?
+</Hint>
+
+<Solution>
+No to both. `fetch_add` doesn't compare, so there's no ABA. A CAS on a
+sequence number that you use only for the value itself — no dependent
+pointer deref, no side effect that assumes stored state — is also
+safe: you're saying "I observed N, now it's N+1," which is true at
+the instant of the CAS regardless of history.
+
+ABA bites when the CAS value is used as a *handle* to further state
+(a pointer to a node, an index into an array slot whose contents are
+also mutating, a version identifier you'll chase in a chain). The
+question to ask: "if the CAS succeeds, am I about to read or write
+memory that was reachable only through my snapshot?" If yes, you
+need ABA protection.
+</Solution>
+</Exercise>

@@ -1,0 +1,371 @@
+---
+title: "Mutexes, condition variables, producer-consumer"
+slug: "03-mutex-condvar"
+order: 3
+status: "full"
+summary: "The blocking toolkit: a mutex to serialize access and a condition variable to wait for state changes. Together they build every classical producer-consumer pattern."
+tags: ["synchronization", "mutex", "condvar", "producer-consumer"]
+---
+
+Lesson 1 showed the problem: two threads incrementing a shared integer
+can lose updates. The simplest correct fix is a **mutex** — a primitive
+that allows at most one thread inside a **critical section** at a
+time. When that's not enough, we pair the mutex with a **condition
+variable** to *wait* for state to change. Put them together and we
+can build the producer-consumer pattern that lives in every real
+server.
+
+## Mutex: at most one inside
+
+A mutex has exactly two states: *unlocked* and *locked*. The two
+operations are:
+
+```c
+int pthread_mutex_lock(pthread_mutex_t *m);
+int pthread_mutex_unlock(pthread_mutex_t *m);
+```
+
+`lock` blocks the caller until the mutex is unlocked, then atomically
+claims it. `unlock` releases it, waking one waiter if any. Between
+the lock and the unlock, the caller is the *only* thread that can be
+inside the critical section — so reads and writes in that region are
+free of data races (**provided** every access to the protected data
+also holds the mutex).
+
+Initialize statically for globals:
+
+```c
+pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+```
+
+Or dynamically, for heap-allocated structs:
+
+```c
+pthread_mutex_init(&obj->mu, NULL);
+/* ... */
+pthread_mutex_destroy(&obj->mu);
+```
+
+### Fixing the race
+
+Lesson 1's data-race counter, now correct:
+
+<Snippet file="03-mutex-counter.c" stripHeader />
+
+Every increment is now a three-step dance: take the lock, add one,
+release. The final value is deterministic: 2,000,000.
+
+This version is slower than the atomic-fetch-add version in
+[lesson 6](/lessons/06-atomics) — a `pthread_mutex_lock` is
+dozens of cycles on the fast path, hundreds under contention, versus
+a single `lock`-prefixed instruction. But it's the right teaching
+primitive: `pthread_mutex_lock` is how 90% of real C code handles
+shared state.
+
+<Aside variant="note" title="How a mutex actually works">
+A modern mutex is not a spinlock. Its fast path is a CAS from 0 to 1
+entirely in userspace — when uncontended it never enters the kernel.
+Only when the fast path fails does it make a `futex(FUTEX_WAIT)`
+syscall to block the caller. Lesson 17 walks through exactly how the
+glibc and musl mutex implementations work.
+</Aside>
+
+### Three flavors of mutex
+
+POSIX defines several mutex *types*. The three that matter:
+
+| Type                  | Behavior on double-lock by the same thread  | Use when…                                            |
+| --------------------- | ------------------------------------------- | ---------------------------------------------------- |
+| `PTHREAD_MUTEX_NORMAL` | Undefined — probably deadlocks              | Default. Cheapest. You verified lock ordering.       |
+| `PTHREAD_MUTEX_ERRORCHECK` | Returns `EDEADLK`                       | Development / debug only.                            |
+| `PTHREAD_MUTEX_RECURSIVE` | Counts; N locks need N unlocks             | Callbacks that may re-enter code under the mutex.    |
+
+Recursive mutexes are usually a sign that your code's locking
+invariants are muddled. Prefer restructuring to unlock-before-callback.
+
+## Condition variables: waiting for state
+
+A mutex is enough for *"don't step on each other."* It is **not** enough
+for *"wait until there's work to do."* You can try to build a waiter
+with a polling loop:
+
+```c
+for (;;) {
+    pthread_mutex_lock(&mu);
+    if (queue_has_items()) { break; }
+    pthread_mutex_unlock(&mu);
+    /* spin? sleep? — either wastes CPU or latency */
+}
+```
+
+A **condition variable** gives you atomic *release-mutex-and-block*
+semantics. The core operations:
+
+```c
+int pthread_cond_wait(pthread_cond_t *cv, pthread_mutex_t *mu);
+int pthread_cond_signal(pthread_cond_t *cv);      /* wake one */
+int pthread_cond_broadcast(pthread_cond_t *cv);   /* wake all */
+```
+
+`pthread_cond_wait` takes an already-locked mutex; it atomically
+unlocks the mutex, blocks on the condvar, and — when woken —
+re-acquires the mutex before returning. You always call it with the
+mutex held.
+
+### The predicate loop idiom
+
+Condition variable waits can wake *spuriously* — without a matching
+signal — on every POSIX implementation. The standard idiom is:
+
+```c
+pthread_mutex_lock(&mu);
+while (!predicate()) {                  /* while, not if */
+    pthread_cond_wait(&cv, &mu);
+}
+/* safe: predicate() is true AND we hold the mutex */
+pthread_mutex_unlock(&mu);
+```
+
+`while` instead of `if` is non-negotiable. Spurious wakeups are rare
+but real; and even with perfect signaling, a woken thread can find
+the state it was waiting for already consumed by a racing thread.
+Always re-check.
+
+<Diagram alt="Timeline: a waiter locks the mutex, checks the predicate (false), calls pthread_cond_wait which atomically unlocks and blocks; a signaler locks, flips the predicate, signals, unlocks; the waiter wakes, reacquires the mutex, rechecks the predicate (true), proceeds.">
+<svg width="640" height="280" viewBox="0 0 640 280" xmlns="http://www.w3.org/2000/svg" fontFamily="var(--font-mono)" fontSize="11">
+  <g fill="var(--color-fg)">
+    <text x="20" y="20" fill="var(--color-fg-muted)">waiter</text>
+    <text x="420" y="20" fill="var(--color-fg-muted)">signaler</text>
+    <line x1="80" y1="40" x2="80" y2="260" stroke="var(--color-border-strong)"/>
+    <line x1="480" y1="40" x2="480" y2="260" stroke="var(--color-border-strong)"/>
+
+    <rect x="30" y="50" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-accent)"/>
+    <text x="36" y="66">lock(mu)</text>
+
+    <rect x="30" y="82" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-border)"/>
+    <text x="36" y="98">predicate?</text>
+    <text x="140" y="98" fill="var(--color-fg-muted)">→ false</text>
+
+    <rect x="10" y="114" width="140" height="38" fill="var(--color-surface-2)" stroke="var(--color-accent)"/>
+    <text x="18" y="130">cond_wait(cv, mu)</text>
+    <text x="18" y="144" fill="var(--color-fg-muted)">atomically: unlock + block</text>
+
+    <rect x="430" y="120" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-accent)"/>
+    <text x="436" y="136">lock(mu)</text>
+
+    <rect x="430" y="152" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-border)"/>
+    <text x="436" y="168">flip pred</text>
+
+    <rect x="430" y="184" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-accent)"/>
+    <text x="436" y="200">cond_signal(cv)</text>
+
+    <rect x="430" y="216" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-accent)"/>
+    <text x="436" y="232">unlock(mu)</text>
+
+    <line x1="440" y1="196" x2="150" y2="155" stroke="var(--color-accent-muted)" strokeDasharray="3,3" markerEnd="url(#a3)"/>
+    <defs><marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--color-accent-muted)"/></marker></defs>
+
+    <rect x="10" y="156" width="140" height="40" fill="var(--color-surface-2)" stroke="var(--color-accent)"/>
+    <text x="18" y="172">wake · reacquire mu</text>
+    <text x="18" y="186" fill="var(--color-fg-muted)">return from cond_wait</text>
+
+    <rect x="30" y="204" width="100" height="24" fill="var(--color-surface-2)" stroke="var(--color-border)"/>
+    <text x="36" y="220">predicate?</text>
+    <text x="140" y="220" fill="var(--color-fg-muted)">→ true, proceed</text>
+  </g>
+</svg>
+</Diagram>
+
+### signal vs broadcast
+
+- **`cond_signal`** wakes one waiter (unspecified which). Use when
+  there is exactly one unit of work being released, so waking more
+  than one would just make extra waiters re-check the predicate and
+  go back to sleep.
+- **`cond_broadcast`** wakes all waiters. Use when the state change
+  might satisfy more than one waiter — e.g., a shutdown flag, or an
+  "N items available" condition where the items might have
+  heterogeneous predicates.
+
+Broadcasting when signal would have sufficed is called the
+*thundering herd*: every woken thread races to reacquire the mutex,
+most re-check the predicate, find it false, and block again. The
+wakeups are wasted work.
+
+## Putting it together: producer-consumer
+
+A bounded FIFO queue, with one producer and one consumer. The
+producer waits on `not_full` when the queue is at capacity; the
+consumer waits on `not_empty` when the queue is empty.
+
+<Snippet file="03-producer-consumer.c" stripHeader />
+
+Key design points:
+
+1. **One mutex protects everything** in the queue — `head`, `tail`,
+   `count`, and the buffer itself. That's the common mutex rule:
+   protect *fields together* that are inspected together.
+2. **Two condition variables**, one for each direction of wait. A
+   single CV would force `cond_broadcast` on every change to wake
+   whichever direction cares, and the wrong-direction waiters would
+   just go back to sleep (thundering herd).
+3. **Signal happens under the lock.** Calling `cond_signal` after
+   `unlock` is technically legal but admits a subtle race on some
+   kernels where a waiter can miss the signal. Always signal while
+   still holding the mutex; the standard permits it and it's
+   portable.
+
+Run it: you'll see producer pushes interleave with consumer pops,
+and when the queue fills (8 items) the producer waits for room.
+
+<Aside variant="hard" title="When producer-consumer isn't two CVs">
+The clean "two CVs" design works for one producer and one consumer.
+With *N* producers and *M* consumers, you still only need two CVs —
+but now `cond_signal` on `not_full` must be done *every* time the
+queue goes from full to not-full, and similarly for `not_empty`.
+Forget one and a producer or consumer sleeps forever despite room
+being available. This is a very common bug; when in doubt, broadcast.
+</Aside>
+
+## The RAII problem (and what C programmers do)
+
+C++ wraps the lock-unlock pair in `std::scoped_lock` so the unlock
+can never be forgotten. C has no destructors, so we rely on
+discipline:
+
+1. Single-return-point functions where possible.
+2. Goto-based cleanup for error paths:
+   ```c
+   pthread_mutex_lock(&mu);
+   if (error) goto out;
+   ...
+   out:
+     pthread_mutex_unlock(&mu);
+     return rc;
+   ```
+3. `__attribute__((cleanup))` on gcc/clang — an underused C
+   extension that emulates destructors. Useful, but foreign to most
+   C codebases.
+
+The surest bug source in concurrent C is a forgotten unlock on an
+error path. Treat every `lock` as placing an *obligation* on the
+current function, and find all exits before the matching unlock.
+
+## Exercises
+
+<Exercise n="1" title="Why does cond_wait take a mutex?">
+The signature `pthread_cond_wait(cv, mu)` looks odd — why not just
+block on the condvar? Construct a concrete race that arises if
+the "atomically release and block" step didn't exist.
+
+<Hint>
+What can happen between the predicate check and a hypothetical
+`cond_wait_without_mutex`?
+</Hint>
+
+<Solution>
+Suppose the API were `cond_wait(cv)` without the mutex argument.
+```c
+pthread_mutex_lock(&mu);
+if (!has_items()) {
+    pthread_mutex_unlock(&mu);
+    cond_wait(&cv);              /* race window is here */
+    pthread_mutex_lock(&mu);
+}
+```
+Between the `unlock` and the `cond_wait`, another thread can lock
+the mutex, add an item, signal `cv`. Our thread hasn't blocked on
+`cv` yet — the signal is lost, we block, and we sleep forever
+despite an item being available.
+
+Making "release the mutex and start waiting" atomic inside
+`cond_wait` closes that window: any signal that happens after we
+release the mutex but before we sleep is queued for us (or makes
+our wait a no-op, depending on implementation).
+</Solution>
+</Exercise>
+
+<Exercise n="2" title="Why while, not if?">
+Change the `while` in `03-producer-consumer.c` to `if` and describe
+a scenario (not just "spurious wakeup") where the program misbehaves.
+
+<Hint>
+What if there are two consumers?
+</Hint>
+
+<Solution>
+With two consumers, the scenario is: consumer A is blocked in
+`cond_wait`. Producer pushes one item, signals `not_empty`. Consumer
+A is woken, reacquires the mutex — but *before* A gets the mutex,
+consumer B (which happened to be awake) grabs it and pops the only
+item. Now A gets the mutex with `count == 0`. With `if`, A proceeds
+to dereference `buf[head]` of an empty queue → garbage or crash.
+With `while`, A rechecks, sees empty, goes back to sleep. Always use
+`while`.
+</Solution>
+</Exercise>
+
+<Exercise n="3" title="Shutdown">
+The producer-consumer snippet runs for exactly `TOTAL` pushes and
+then exits. How would you cleanly support an external shutdown
+signal — a flag that, when set, drains any remaining items and then
+returns from the consumer's loop without blocking?
+
+<Hint>
+Add a `shutdown` field. What does the consumer's wait condition
+become? Which CV do you need to broadcast on?
+</Hint>
+
+<Solution>
+Add an `int shutdown` to `queue_t`. The consumer's wait loop becomes:
+```c
+while (q->count == 0 && !q->shutdown) pthread_cond_wait(...);
+if (q->count == 0 && q->shutdown) {
+    pthread_mutex_unlock(&q->mu);
+    return SENTINEL_DONE;
+}
+```
+Shutdown code sets the flag under the lock and
+`pthread_cond_broadcast(&q->not_empty)` — broadcast, not signal,
+because all consumers should wake and check. Producers are out of
+the loop by this point; if they weren't, you'd do the symmetric
+thing on `not_full`.
+</Solution>
+</Exercise>
+
+<Exercise n="4" title="Write a semaphore in terms of mutex+condvar">
+POSIX has `sem_t` but let's build one from scratch. Define
+`sem_init(s, int count)`, `sem_wait(s)` (decrement, block if zero),
+and `sem_post(s)` (increment, wake one waiter). What's the minimum
+set of primitives needed?
+
+<Solution>
+```c
+typedef struct {
+    int count;
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+} sem_t;
+
+void sem_init(sem_t *s, int c) {
+    s->count = c;
+    pthread_mutex_init(&s->mu, NULL);
+    pthread_cond_init(&s->cv, NULL);
+}
+void sem_wait(sem_t *s) {
+    pthread_mutex_lock(&s->mu);
+    while (s->count == 0) pthread_cond_wait(&s->cv, &s->mu);
+    s->count--;
+    pthread_mutex_unlock(&s->mu);
+}
+void sem_post(sem_t *s) {
+    pthread_mutex_lock(&s->mu);
+    s->count++;
+    pthread_cond_signal(&s->cv);
+    pthread_mutex_unlock(&s->mu);
+}
+```
+One mutex, one condition variable. `sem_post` uses `cond_signal`
+because each post releases exactly one waiter.
+</Solution>
+</Exercise>

@@ -1,48 +1,31 @@
-# Built application files
-*.apk
-*.aar
-*.ap_
-*.aab
-
-# Files for the ART/Dalvik VM
-*.dex
-
-# Java class files
-*.class
-
-# Generated files
-bin/
-gen/
+# -------- Node / Next.js --------
+node_modules/
+.next/
+.turbo/
 out/
-release/
-build/
+dist/
 
-# Gradle files
-.gradle/
-gradle-app.setting
-!gradle-wrapper.jar
-!gradle-wrapper.properties
+# build output from scripts/build-search-index.mjs
+public/search.json
 
-# Local configuration
-local.properties
+# Compiled C snippets
+snippets/build/
+snippets/*.o
+snippets/*.dSYM/
 
-# IntelliJ / Android Studio
-*.iml
-.idea/
-captures/
-.externalNativeBuild/
-.cxx/
+# TypeScript
+next-env.d.ts
+*.tsbuildinfo
 
-# Keystore files
-*.jks
-*.keystore
+# -------- Environment / secrets --------
+.env
+.env*.local
 
-# macOS
+# -------- IDE / OS --------
 .DS_Store
-
-# Log files
-*.log
-
-# Other
-.navigation/
+.idea/
+.vscode/
 .claude/
+*.iml
+
+# Note: Android-specific ignores live in android/.gitignore

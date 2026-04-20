@@ -1,0 +1,18 @@
+---
+title: "Debugging: TSAN, helgrind, stress testing"
+slug: "19-tsan-helgrind"
+order: 19
+status: "stub"
+summary: "Four tools for concurrency bugs — and the debugging strategies that don't fit in any one of them."
+tags: ["debugging", "tools"]
+---
+
+## What this lesson will cover
+
+- ThreadSanitizer (`-fsanitize=thread`): low overhead, instrumentation-based happens-before tracker.
+- Helgrind / DRD (Valgrind): slower but detects lock-order violations and API misuse.
+- `rr`: deterministic record-replay — the debugger for "only happens in prod" races.
+- Stress testing with `stress-ng`, ChaosMesh-style random delays, `sched_setaffinity` pinning.
+- Why none of these *prove* correctness: model checkers (CDSChecker, GenMC) for that.
+
+<Aside variant="note">Coming soon.</Aside>

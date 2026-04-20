@@ -1,0 +1,19 @@
+---
+title: "Michael-Scott queue"
+slug: "13-michael-scott"
+order: 13
+status: "stub"
+summary: "The classical lock-free FIFO queue. Two CAS points (head and tail) instead of one, with a 'help the lagging tail' dance."
+tags: ["lock-free", "queue"]
+---
+
+## What this lesson will cover
+
+- Two CAS loops: enqueue swings `tail`, dequeue swings `head`.
+- The dummy node: why the queue is never truly empty.
+- Helping: if tail is lagging (points to a node whose `next` is non-NULL), the
+  enqueuer must advance it before completing its own work.
+- Memory reclamation implications (still lesson 15).
+- Why a straightforward "swap the node" approach doesn't work.
+
+<Aside variant="note">Coming soon.</Aside>

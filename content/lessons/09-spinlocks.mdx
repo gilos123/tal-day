@@ -1,0 +1,18 @@
+---
+title: "Spinlocks, ticket locks, MCS locks"
+slug: "09-spinlocks"
+order: 9
+status: "stub"
+summary: "Building a lock out of atomics. Three designs, each fixing a problem in the last."
+tags: ["locks", "spinlocks"]
+---
+
+## What this lesson will cover
+
+- Test-and-set spinlock: the simplest design and its fairness / cache-line-storm problems.
+- Ticket lock: FIFO fairness with a counter pair; still bounces the line.
+- MCS lock: per-thread queue nodes, spin on a local flag, O(1) cache traffic on handoff.
+- Backoff strategies: exponential, proportional.
+- When a spinlock is the right choice (short critical sections, never preempted) vs when to use a futex-backed mutex.
+
+<Aside variant="note">Coming soon.</Aside>

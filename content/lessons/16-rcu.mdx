@@ -1,0 +1,18 @@
+---
+title: "RCU"
+slug: "16-rcu"
+order: 16
+status: "stub"
+summary: "Read-Copy-Update. The Linux kernel's answer to read-mostly data: readers pay nothing, writers do the work."
+tags: ["lock-free", "rcu", "kernel"]
+---
+
+## What this lesson will cover
+
+- The read side: zero barriers, zero atomics, essentially free.
+- Grace period: wait until every reader that was active when the old data was retired has finished.
+- Writer side: copy, modify, publish-via-atomic-pointer-store, wait for grace period, free.
+- userland RCU (liburcu) vs kernel RCU.
+- When RCU doesn't fit (update-heavy or fan-in writer patterns).
+
+<Aside variant="note">Coming soon.</Aside>

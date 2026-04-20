@@ -1,0 +1,19 @@
+---
+title: "Memory reclamation"
+slug: "15-reclamation"
+order: 15
+status: "stub"
+summary: "Hazard pointers and epoch-based reclamation: how to free memory in a lock-free data structure without stepping on another thread's snapshot."
+tags: ["lock-free", "memory"]
+---
+
+## What this lesson will cover
+
+- The fundamental problem: a retired node may still be referenced by any thread
+  that had snapshotted it before retirement.
+- Hazard pointers (Michael 2004): O(1) per-operation space, O(N×M) scan on retire.
+- Epoch-based reclamation (EBR): global epoch counter, free nodes two epochs old.
+- Quiescent-state reclamation: nodes free only at points threads promise not to hold any.
+- Trade-offs: hazard pointers bound memory tightly; EBR is faster in the common case.
+
+<Aside variant="note">Coming soon.</Aside>

@@ -1,31 +1,47 @@
 # tal-day
 
-Android study tracker — one persistent daily schedule, per-topic countdown timers that run in the background, hierarchical topic notes, and a stats dashboard.
+Monorepo with two independent projects:
 
-## Features
+| Path | Project | Stack |
+|---|---|---|
+| `/` (root) | **Concurrency in C** — code-first technical reference static site | Next.js 15 · React 19 · TypeScript · MDX · Tailwind |
+| `/android/` | **Study tracker** — daily schedule, per-topic background timers, hierarchical notes, stats dashboard | Kotlin · Jetpack Compose · Room · Hilt · Foreground Service · Vico charts |
 
-- **My Schedule** — one list of topics + planned minutes, same every day, with a per-row checkbox that auto-resets at midnight.
-- **Background timer** — tap Start on any row to launch a foreground-service countdown. A persistent mini bar at the bottom of every screen shows the remaining time; you can keep using the rest of the app while it runs. Notification survives backgrounding.
-- **Topic folders** — tap a topic name to open a hierarchical notes tree (subfolders + notes with DONE / NOT_DONE / NONE status toggles).
-- **Stats** — live-updating dashboard:
-  - Today / This week / Streak headline cards
-  - Lifetime total study time + session count
-  - "This week" bar chart (7 bars, Sun → Sat, day-of-week labels)
-  - "Last 14 days" bar chart (day-of-month labels)
-  - Previous 6 weeks with total + per-day average
+The two projects share no build configuration — they're independent and just happen to live in the same Git repo for convenience.
 
-## Tech
+---
 
-Kotlin · Jetpack Compose (Material 3) · MVVM · Room · Hilt · Navigation Compose · Vico charts · Foreground Service.
+## Concurrency in C (root)
 
-- `minSdk 26`, `targetSdk 34`, `compileSdk 34`
-- Package root: `com.maayan.studytracker`
-
-## Build
+Code-first technical reference for concurrency in C — machine model through lock-free data structures. Lesson content authored in MDX, built as a static site.
 
 ```sh
+npm install
+npm run search-index   # builds public/search.json
+npm run dev            # http://localhost:3000
+
+# production
+npm run build
+npm start
+```
+
+Runnable C snippets live in `snippets/`:
+
+```sh
+cd snippets
+make all               # compiles every .c with -std=c11 -Wall -Wextra -pthread -fsanitize=thread
+make run-01-race       # data-race demo
+make run-11-treiber    # Treiber stack stress test
+```
+
+Daily checkbox reset (Israel timezone): see `lib/daily-checks.ts`. The `MarkComplete` button on each lesson page visually resets at midnight **Asia/Jerusalem** while lifetime completion (`lib/progress.ts`) and the Progress Dashboard are untouched.
+
+## Study Tracker (android/)
+
+See [`android/README.md`](android/README.md). Build with Android Studio or:
+
+```sh
+cd android
 ./gradlew assembleDebug
 ./gradlew installDebug
 ```
-
-On first run Android Studio will also generate the Gradle wrapper JAR and a `local.properties` with your SDK path.
