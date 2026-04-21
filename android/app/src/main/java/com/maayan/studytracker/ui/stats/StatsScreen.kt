@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.maayan.studytracker.ui.common.GamificationBadges
 import com.patrykandpatrick.vico.compose.axis.horizontal.rememberBottomAxis
 import com.patrykandpatrick.vico.compose.axis.vertical.rememberStartAxis
 import com.patrykandpatrick.vico.compose.chart.Chart
@@ -62,6 +63,9 @@ fun StatsScreen(
                     IconButton(onClick = onBack) {
                         Icon(Icons.Filled.ArrowBack, contentDescription = "Back")
                     }
+                },
+                actions = {
+                    GamificationBadges(modifier = Modifier.padding(end = 8.dp))
                 }
             )
         }
@@ -88,8 +92,10 @@ private fun EmptyState(modifier: Modifier) {
         contentAlignment = Alignment.Center
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("🎯", style = MaterialTheme.typography.displayLarge)
+            Spacer(Modifier.height(12.dp))
             Text(
-                "No study sessions yet",
+                "Let's go!",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
             )

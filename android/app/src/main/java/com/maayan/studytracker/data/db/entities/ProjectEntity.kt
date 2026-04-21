@@ -7,5 +7,7 @@ import androidx.room.PrimaryKey
 data class ProjectEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
-    val orderIndex: Int
+    val orderIndex: Int,
+    /** Hex color string for the project's tag dot / row stripe (e.g. "#5BE32A"). */
+    val color: String = "#5BE32A"
 )

@@ -30,4 +30,12 @@ interface TimerSessionDao {
     /** Reactive lifetime session count. */
     @Query("SELECT COUNT(*) FROM timer_sessions")
     fun observeSessionCount(): Flow<Int>
+
+    /**
+     * One-shot snapshot of every session ever recorded. Used by the achievement
+     * evaluator to compute single-session rules (Marathon, Night Owl, etc.) without
+     * needing a continuously-streamed flow.
+     */
+    @Query("SELECT * FROM timer_sessions ORDER BY completedAt ASC")
+    suspend fun getAllSessions(): List<TimerSessionEntity>
 }

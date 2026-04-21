@@ -1,23 +1,34 @@
 package com.maayan.studytracker.ui.schedule
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.EmojiEvents
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -49,7 +60,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.LayoutDirection
@@ -57,6 +73,10 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.maayan.studytracker.data.db.entities.ProjectEntity
+import com.maayan.studytracker.ui.common.GamificationBadges
+import com.maayan.studytracker.ui.common.ProjectColorPicker
+import com.maayan.studytracker.ui.common.hexToColor
+import com.maayan.studytracker.ui.theme.DefaultProjectColorHex
 import kotlinx.coroutines.launch
 import java.time.LocalDate
 
@@ -65,6 +85,8 @@ import java.time.LocalDate
 fun ScheduleScreen(
     onOpenTopic: (projectId: Long, topicName: String) -> Unit,
     onOpenStats: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenAchievements: () -> Unit,
     viewModel: ScheduleViewModel = hiltViewModel()
 ) {
     val items by viewModel.items.collectAsStateWithLifecycle()
@@ -80,10 +102,10 @@ fun ScheduleScreen(
     var renameTarget by remember { mutableStateOf<ProjectEntity?>(null) }
     var deleteTarget by remember { mutableStateOf<ProjectEntity?>(null) }
 
-    // Material 3's ModalNavigationDrawer always opens on the start edge. Wrapping it in
-    // LayoutDirection.Rtl flips it to the end edge (visually: right in an LTR app). The
-    // drawer sheet and main content are then forced back to Ltr so their own children
-    // render normally.
+    val projectStripeColor =
+        hexToColor(selectedProject?.color ?: DefaultProjectColorHex)
+
+    // Flip the drawer to open from the right by wrapping in LayoutDirection.Rtl.
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         ModalNavigationDrawer(
             drawerState = drawerState,
@@ -98,7 +120,15 @@ fun ScheduleScreen(
                         },
                         onAdd = { showNewProjectDialog = true },
                         onRename = { renameTarget = it },
-                        onDelete = { deleteTarget = it }
+                        onDelete = { deleteTarget = it },
+                        onOpenSettings = {
+                            scope.launch { drawerState.close() }
+                            onOpenSettings()
+                        },
+                        onOpenAchievements = {
+                            scope.launch { drawerState.close() }
+                            onOpenAchievements()
+                        }
                     )
                 }
             }
@@ -107,8 +137,17 @@ fun ScheduleScreen(
                 Scaffold(
                     topBar = {
                         TopAppBar(
-                            title = { Text(selectedProject?.name ?: "My Schedule") },
+                            title = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    ProjectDot(projectStripeColor, size = 10.dp)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(selectedProject?.name ?: "My Schedule")
+                                }
+                            },
                             actions = {
+                                GamificationBadges(
+                                    modifier = Modifier.padding(end = 4.dp)
+                                )
                                 IconButton(onClick = onOpenStats) {
                                     Icon(Icons.Filled.BarChart, contentDescription = "Stats")
                                 }
@@ -124,31 +163,36 @@ fun ScheduleScreen(
                         }
                     }
                 ) { padding ->
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding),
-                        contentPadding = PaddingValues(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(items, key = { it.id }) { item ->
-                            val doneToday = item.lastDoneDate == todayIso
-                            ScheduleRow(
-                                topicName = item.topicName,
-                                minutes = item.plannedDurationMinutes,
-                                doneToday = doneToday,
-                                onToggleDone = { viewModel.toggleDone(item.id, doneToday) },
-                                onTopicChange = { viewModel.updateTopicName(item.id, it) },
-                                onMinutesChange = { viewModel.updateDuration(item.id, it) },
-                                onOpenTopic = {
-                                    val pid = selectedProjectId
-                                    if (pid != null && item.topicName.isNotBlank()) {
-                                        onOpenTopic(pid, item.topicName)
-                                    }
-                                },
-                                onStartTimer = { viewModel.startTimerFor(item.id) },
-                                onDelete = { viewModel.deleteRow(item.id) }
-                            )
+                    if (items.isEmpty()) {
+                        EmptyScheduleState(modifier = Modifier.padding(padding))
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(padding),
+                            contentPadding = PaddingValues(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(items, key = { it.id }) { item ->
+                                val doneToday = item.lastDoneDate == todayIso
+                                ScheduleRow(
+                                    stripeColor = projectStripeColor,
+                                    topicName = item.topicName,
+                                    minutes = item.plannedDurationMinutes,
+                                    doneToday = doneToday,
+                                    onToggleDone = { viewModel.toggleDone(item.id, doneToday) },
+                                    onTopicChange = { viewModel.updateTopicName(item.id, it) },
+                                    onMinutesChange = { viewModel.updateDuration(item.id, it) },
+                                    onOpenTopic = {
+                                        val pid = selectedProjectId
+                                        if (pid != null && item.topicName.isNotBlank()) {
+                                            onOpenTopic(pid, item.topicName)
+                                        }
+                                    },
+                                    onStartTimer = { viewModel.startTimerFor(item.id) },
+                                    onDelete = { viewModel.deleteRow(item.id) }
+                                )
+                            }
                         }
                     }
                 }
@@ -159,21 +203,26 @@ fun ScheduleScreen(
     if (showNewProjectDialog) {
         ProjectNameDialog(
             title = "New project",
-            initial = "",
+            initialName = "",
+            initialColorHex = DefaultProjectColorHex,
             onDismiss = { showNewProjectDialog = false },
-            onConfirm = { name ->
-                viewModel.createProject(name)
+            onConfirm = { name, color ->
+                viewModel.createProject(name, color)
                 showNewProjectDialog = false
             }
         )
     }
     renameTarget?.let { target ->
         ProjectNameDialog(
-            title = "Rename project",
-            initial = target.name,
+            title = "Edit project",
+            initialName = target.name,
+            initialColorHex = target.color,
             onDismiss = { renameTarget = null },
-            onConfirm = { name ->
-                viewModel.renameProject(target.id, name)
+            onConfirm = { name, color ->
+                if (name != target.name) viewModel.renameProject(target.id, name)
+                if (!color.equals(target.color, ignoreCase = true)) {
+                    viewModel.setProjectColor(target.id, color)
+                }
                 renameTarget = null
             }
         )
@@ -204,13 +253,51 @@ fun ScheduleScreen(
 // ---------------------------------------------------------------------------------------
 
 @Composable
+private fun EmptyScheduleState(modifier: Modifier) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("🎯", style = MaterialTheme.typography.displayLarge)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "Let's go!",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Tap + to add your first topic.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ProjectDot(color: Color, size: androidx.compose.ui.unit.Dp = 12.dp) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(color)
+    )
+}
+
+@Composable
 private fun ProjectsDrawerSheet(
     projects: List<ProjectEntity>,
     selectedId: Long?,
     onSelect: (Long) -> Unit,
     onAdd: () -> Unit,
     onRename: (ProjectEntity) -> Unit,
-    onDelete: (ProjectEntity) -> Unit
+    onDelete: (ProjectEntity) -> Unit,
+    onOpenSettings: () -> Unit,
+    onOpenAchievements: () -> Unit
 ) {
     ModalDrawerSheet {
         Text(
@@ -221,9 +308,7 @@ private fun ProjectsDrawerSheet(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
-        LazyColumn(
-            modifier = Modifier.weight(1f, fill = true)
-        ) {
+        LazyColumn(modifier = Modifier.weight(1f, fill = true)) {
             items(projects, key = { it.id }) { project ->
                 NavigationDrawerItem(
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
@@ -232,6 +317,8 @@ private fun ProjectsDrawerSheet(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            ProjectDot(hexToColor(project.color))
+                            Spacer(Modifier.width(10.dp))
                             Text(project.name, modifier = Modifier.weight(1f))
                             IconButton(onClick = { onRename(project) }) {
                                 Icon(
@@ -257,6 +344,9 @@ private fun ProjectsDrawerSheet(
         }
 
         HorizontalDivider()
+        DrawerExtraRow(icon = Icons.Filled.EmojiEvents, label = "Achievements", onClick = onOpenAchievements)
+        DrawerExtraRow(icon = Icons.Filled.Settings, label = "Settings", onClick = onOpenSettings)
+        HorizontalDivider()
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -272,27 +362,59 @@ private fun ProjectsDrawerSheet(
 }
 
 @Composable
+private fun DrawerExtraRow(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() }
+            .padding(horizontal = 24.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
 private fun ProjectNameDialog(
     title: String,
-    initial: String,
+    initialName: String,
+    initialColorHex: String,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
+    onConfirm: (name: String, colorHex: String) -> Unit
 ) {
-    var name by remember { mutableStateOf(initial) }
+    var name by remember { mutableStateOf(initialName) }
+    var colorHex by remember { mutableStateOf(initialColorHex) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("Name") },
-                singleLine = true
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    label = { Text("Name") },
+                    singleLine = true
+                )
+                Text(
+                    "Color tag",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                ProjectColorPicker(
+                    selectedHex = colorHex,
+                    onPick = { colorHex = it }
+                )
+            }
         },
         confirmButton = {
             TextButton(
-                onClick = { onConfirm(name) },
+                onClick = { onConfirm(name, colorHex) },
                 enabled = name.trim().isNotEmpty()
             ) { Text("Save") }
         },
@@ -304,6 +426,7 @@ private fun ProjectNameDialog(
 
 @Composable
 private fun ScheduleRow(
+    stripeColor: Color,
     topicName: String,
     minutes: Int,
     doneToday: Boolean,
@@ -314,55 +437,76 @@ private fun ScheduleRow(
     onStartTimer: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val rowModifier = Modifier
-        .fillMaxWidth()
-        .alpha(if (doneToday) 0.55f else 1f)
-
+    val haptics = LocalHapticFeedback.current
+    val checkScale by animateFloatAsState(
+        targetValue = if (doneToday) 1.1f else 1f,
+        animationSpec = spring(dampingRatio = 0.4f, stiffness = 550f),
+        label = "checkScale"
+    )
     val topicTextStyle = LocalTextStyle.current.copy(
         textDecoration = if (doneToday) TextDecoration.LineThrough else TextDecoration.None
     )
 
-    Column(modifier = rowModifier) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Checkbox(
-                checked = doneToday,
-                onCheckedChange = { onToggleDone() }
-            )
-            OutlinedTextField(
-                value = topicName,
-                onValueChange = onTopicChange,
-                label = { Text("Topic") },
-                singleLine = true,
-                textStyle = topicTextStyle,
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = minutes.toString(),
-                onValueChange = { input -> input.toIntOrNull()?.let(onMinutesChange) },
-                label = { Text("Min") },
-                singleLine = true,
-                modifier = Modifier.width(84.dp)
-            )
-        }
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            TextButton(
-                onClick = onOpenTopic,
-                modifier = Modifier.weight(1f)
-            ) { Text("Open topic folder") }
-            Button(onClick = onStartTimer) {
-                Icon(Icons.Filled.PlayArrow, contentDescription = null)
-                Text("Start")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (doneToday) 0.55f else 1f)
+    ) {
+        // Color stripe on leading edge
+        Box(
+            modifier = Modifier
+                .width(4.dp)
+                .fillMaxHeight()
+                .clip(MaterialTheme.shapes.extraSmall)
+                .background(stripeColor)
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Checkbox(
+                    checked = doneToday,
+                    onCheckedChange = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onToggleDone()
+                    },
+                    modifier = Modifier.scale(checkScale)
+                )
+                OutlinedTextField(
+                    value = topicName,
+                    onValueChange = onTopicChange,
+                    label = { Text("Topic") },
+                    singleLine = true,
+                    textStyle = topicTextStyle,
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = minutes.toString(),
+                    onValueChange = { input -> input.toIntOrNull()?.let(onMinutesChange) },
+                    label = { Text("Min") },
+                    singleLine = true,
+                    modifier = Modifier.width(84.dp)
+                )
             }
-            IconButton(onClick = onDelete) {
-                Icon(Icons.Filled.Delete, contentDescription = "Delete")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TextButton(
+                    onClick = onOpenTopic,
+                    modifier = Modifier.weight(1f)
+                ) { Text("Open topic folder") }
+                Button(onClick = onStartTimer) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = null)
+                    Text("Start")
+                }
+                IconButton(onClick = onDelete) {
+                    Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                }
             }
         }
     }

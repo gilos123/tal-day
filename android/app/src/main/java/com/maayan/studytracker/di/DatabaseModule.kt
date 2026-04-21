@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.maayan.studytracker.data.dao.AchievementDao
 import com.maayan.studytracker.data.dao.NoteDao
 import com.maayan.studytracker.data.dao.ProjectDao
 import com.maayan.studytracker.data.dao.ScheduleItemDao
@@ -59,11 +60,36 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v4 → v5: Streak style overhaul data.
+     *   1. Add `color` column to projects (default brand lime) for per-project color tags.
+     *   2. Create the `achievements` table that records when each achievement was unlocked.
+     */
+    private val MIGRATION_4_5 = object : Migration(4, 5) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE projects ADD COLUMN color TEXT NOT NULL DEFAULT '#5BE32A'"
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS achievements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    code TEXT NOT NULL,
+                    unlockedAt INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL(
+                "CREATE UNIQUE INDEX IF NOT EXISTS index_achievements_code ON achievements(code)"
+            )
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "maayan.db")
-            .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .fallbackToDestructiveMigration()
             .build()
 
@@ -72,4 +98,5 @@ object DatabaseModule {
     @Provides fun provideTimerSessionDao(db: AppDatabase): TimerSessionDao = db.timerSessionDao()
     @Provides fun provideTopicFolderDao(db: AppDatabase): TopicFolderDao = db.topicFolderDao()
     @Provides fun provideNoteDao(db: AppDatabase): NoteDao = db.noteDao()
+    @Provides fun provideAchievementDao(db: AppDatabase): AchievementDao = db.achievementDao()
 }

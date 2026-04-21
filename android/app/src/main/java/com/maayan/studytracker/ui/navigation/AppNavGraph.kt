@@ -7,7 +7,9 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import com.maayan.studytracker.ui.achievements.AchievementsScreen
 import com.maayan.studytracker.ui.schedule.ScheduleScreen
+import com.maayan.studytracker.ui.settings.SettingsScreen
 import com.maayan.studytracker.ui.stats.StatsScreen
 import com.maayan.studytracker.ui.timer.TimerScreen
 import com.maayan.studytracker.ui.topic.TopicFolderScreen
@@ -17,6 +19,8 @@ object Routes {
     const val TIMER = "timer"
     const val TOPIC = "topic/{projectId}/{topicName}?folderId={folderId}"
     const val STATS = "stats"
+    const val SETTINGS = "settings"
+    const val ACHIEVEMENTS = "achievements"
 
     fun topic(projectId: Long, topicName: String, folderId: Long? = null): String {
         val encoded = Uri.encode(topicName)
@@ -33,7 +37,9 @@ fun AppNavGraph(navController: NavHostController) {
                 onOpenTopic = { projectId, topicName ->
                     navController.navigate(Routes.topic(projectId, topicName))
                 },
-                onOpenStats = { navController.navigate(Routes.STATS) }
+                onOpenStats = { navController.navigate(Routes.STATS) },
+                onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                onOpenAchievements = { navController.navigate(Routes.ACHIEVEMENTS) }
             )
         }
         composable(Routes.TIMER) {
@@ -65,6 +71,12 @@ fun AppNavGraph(navController: NavHostController) {
         }
         composable(Routes.STATS) {
             StatsScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.SETTINGS) {
+            SettingsScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.ACHIEVEMENTS) {
+            AchievementsScreen(onBack = { navController.popBackStack() })
         }
     }
 }

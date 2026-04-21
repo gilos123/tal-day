@@ -118,15 +118,19 @@ class ScheduleViewModel @Inject constructor(
         _selectedProjectId.value = projectId
     }
 
-    fun createProject(name: String) {
+    fun createProject(name: String, color: String) {
         viewModelScope.launch {
-            val id = projectRepository.createProject(name)
+            val id = projectRepository.createProject(name, color)
             _selectedProjectId.value = id
         }
     }
 
     fun renameProject(projectId: Long, newName: String) {
         viewModelScope.launch { projectRepository.renameProject(projectId, newName) }
+    }
+
+    fun setProjectColor(projectId: Long, colorHex: String) {
+        viewModelScope.launch { projectRepository.setColor(projectId, colorHex) }
     }
 
     /**
@@ -142,7 +146,7 @@ class ScheduleViewModel @Inject constructor(
                 _selectedProjectId.value = if (remaining.isNotEmpty()) {
                     remaining.first().id
                 } else {
-                    projectRepository.createProject("My Schedule")
+                    projectRepository.createProject("My Schedule") // uses default color
                 }
             }
         }

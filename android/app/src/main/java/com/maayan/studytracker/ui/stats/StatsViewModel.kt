@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.maayan.studytracker.data.dao.DailyTotal
 import com.maayan.studytracker.data.repository.StatsRepository
+import com.maayan.studytracker.data.repository.computeStreak
 import com.maayan.studytracker.util.DateUtils
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -132,15 +133,6 @@ class StatsViewModel @Inject constructor(
         )
     }
 
-    private fun computeStreak(byDate: Map<LocalDate, Long>, today: LocalDate): Int {
-        val hasToday = (byDate[today] ?: 0L) > 0L
-        var cursor = if (hasToday) today else today.minusDays(1)
-        var count = 0
-        while ((byDate[cursor] ?: 0L) > 0L) {
-            count++
-            cursor = cursor.minusDays(1)
-            if (count > 10_000) break
-        }
-        return count
-    }
+    // Streak math lives in the repository now so GamificationBar and Stats share a
+    // single implementation (see data/repository/StatsRepository.kt#computeStreak).
 }

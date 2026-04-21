@@ -2,6 +2,7 @@ package com.maayan.studytracker.ui.timer
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.maayan.studytracker.ui.common.Confetti
 import kotlinx.coroutines.delay
 
 /**
@@ -49,11 +51,12 @@ fun TimerMiniBar(
 
     if (!state.running && !state.finished) return
 
-    Surface(
+    Box(modifier = Modifier.fillMaxWidth()) {
+      Surface(
         color = MaterialTheme.colorScheme.primaryContainer,
         contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         modifier = Modifier.fillMaxWidth()
-    ) {
+      ) {
         Column {
             val progress = if (state.plannedSeconds > 0) {
                 1f - (state.remainingSeconds.toFloat() / state.plannedSeconds.toFloat())
@@ -86,7 +89,7 @@ fun TimerMiniBar(
                     )
                     Spacer(Modifier.height(2.dp))
                     Text(
-                        if (state.finished) "Session saved"
+                        if (state.finished) "Session saved ✨"
                         else "${formatTime(state.remainingSeconds)} remaining",
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -98,6 +101,13 @@ fun TimerMiniBar(
                 }
             }
         }
+      }
+      // Subtle celebration burst when the session just ended; disappears automatically.
+      Confetti(
+          active = state.finished,
+          particleCount = 25,
+          durationMillis = 1400L
+      )
     }
 }
 

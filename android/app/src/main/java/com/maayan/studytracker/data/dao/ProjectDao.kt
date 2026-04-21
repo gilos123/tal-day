@@ -29,6 +29,9 @@ interface ProjectDao {
     @Query("UPDATE projects SET name = :name WHERE id = :id")
     suspend fun updateName(id: Long, name: String)
 
+    @Query("UPDATE projects SET color = :color WHERE id = :id")
+    suspend fun updateColor(id: Long, color: String)
+
     @Query("DELETE FROM projects WHERE id = :id")
     suspend fun deleteById(id: Long)
 }

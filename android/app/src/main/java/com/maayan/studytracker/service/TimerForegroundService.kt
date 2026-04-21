@@ -10,6 +10,7 @@ import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import com.maayan.studytracker.MainActivity
 import com.maayan.studytracker.StudyTrackerApp
+import com.maayan.studytracker.data.repository.AchievementsRepository
 import com.maayan.studytracker.data.repository.TimerRepository
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Job
@@ -26,6 +27,7 @@ class TimerForegroundService : LifecycleService() {
 
     @Inject lateinit var stateHolder: TimerStateHolder
     @Inject lateinit var timerRepository: TimerRepository
+    @Inject lateinit var achievementsRepository: AchievementsRepository
 
     private var tickJob: Job? = null
     private var startedAtElapsed: Long = 0L
@@ -105,6 +107,9 @@ class TimerForegroundService : LifecycleService() {
                 date = date,
                 actualDurationSeconds = actual
             )
+            // Evaluate achievements once the row is committed. Safe to fail silently —
+            // unlocking is best-effort and never blocks the UI-critical state update.
+            runCatching { achievementsRepository.checkAndUnlock() }
             stateHolder.update(
                 stateHolder.state.value.copy(
                     remainingSeconds = 0,

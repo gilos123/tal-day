@@ -4,6 +4,7 @@ import com.maayan.studytracker.data.dao.ProjectDao
 import com.maayan.studytracker.data.dao.ScheduleItemDao
 import com.maayan.studytracker.data.dao.TopicFolderDao
 import com.maayan.studytracker.data.db.entities.ProjectEntity
+import com.maayan.studytracker.ui.theme.DefaultProjectColorHex
 import kotlinx.coroutines.flow.Flow
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -28,18 +29,24 @@ class ProjectRepository @Inject constructor(
     suspend fun ensureAtLeastOneProject(): Long {
         val existing = projectDao.getAll()
         if (existing.isNotEmpty()) return existing.first().id
-        return createProject("My Schedule")
+        return createProject("My Schedule", DefaultProjectColorHex)
     }
 
-    suspend fun createProject(name: String): Long {
+    suspend fun createProject(name: String, color: String = DefaultProjectColorHex): Long {
         val trimmed = name.trim().ifBlank { "New project" }
         val nextOrder = projectDao.maxOrder() + 1
-        return projectDao.insert(ProjectEntity(name = trimmed, orderIndex = nextOrder))
+        return projectDao.insert(
+            ProjectEntity(name = trimmed, orderIndex = nextOrder, color = color)
+        )
     }
 
     suspend fun renameProject(id: Long, newName: String) {
         val trimmed = newName.trim().ifBlank { return }
         projectDao.updateName(id, trimmed)
+    }
+
+    suspend fun setColor(id: Long, color: String) {
+        projectDao.updateColor(id, color)
     }
 
     /**

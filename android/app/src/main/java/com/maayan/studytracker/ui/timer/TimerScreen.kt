@@ -27,12 +27,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.maayan.studytracker.ui.common.Confetti
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,10 +44,12 @@ fun TimerScreen(
     viewModel: TimerViewModel = hiltViewModel()
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val haptics = LocalHapticFeedback.current
 
     LaunchedEffect(state.finished) {
         if (state.finished) {
-            delay(1_500)
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            delay(1_800)
             viewModel.clearFinishedState()
             onBack()
         }
@@ -63,77 +67,82 @@ fun TimerScreen(
             )
         }
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(24.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            if (!state.running && !state.finished) {
-                Text(
-                    "No active timer",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.outline
-                )
-                return@Column
-            }
-
-            Text(
-                state.topicName.ifBlank { "Session" },
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Planned: ${state.plannedSeconds / 60} min",
-                color = MaterialTheme.colorScheme.outline
-            )
-            Spacer(Modifier.height(32.dp))
-
-            Box(
-                modifier = Modifier.size(260.dp),
-                contentAlignment = Alignment.Center
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                val progress = if (state.plannedSeconds > 0) {
-                    state.remainingSeconds.toFloat() / state.plannedSeconds.toFloat()
-                } else 0f
-                CircularProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(CircleShape),
-                    strokeWidth = 12.dp,
-                    color = MaterialTheme.colorScheme.primary,
-                    trackColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-                Text(
-                    text = formatTime(state.remainingSeconds),
-                    fontSize = 56.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
+                if (!state.running && !state.finished) {
+                    Text(
+                        "No active timer",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.outline
+                    )
+                    return@Column
+                }
 
-            Spacer(Modifier.height(32.dp))
-
-            if (state.finished) {
                 Text(
-                    "Session saved",
-                    color = MaterialTheme.colorScheme.primary,
+                    state.topicName.ifBlank { "Session" },
+                    style = MaterialTheme.typography.headlineSmall,
                     fontWeight = FontWeight.SemiBold
                 )
-            } else {
-                Button(
-                    onClick = viewModel::stop,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = Color.White
-                    )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Planned: ${state.plannedSeconds / 60} min",
+                    color = MaterialTheme.colorScheme.outline
+                )
+                Spacer(Modifier.height(32.dp))
+
+                Box(
+                    modifier = Modifier.size(260.dp),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Text("Stop")
+                    val progress = if (state.plannedSeconds > 0) {
+                        state.remainingSeconds.toFloat() / state.plannedSeconds.toFloat()
+                    } else 0f
+                    CircularProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape),
+                        strokeWidth = 12.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                    Text(
+                        text = formatTime(state.remainingSeconds),
+                        fontSize = 56.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(Modifier.height(32.dp))
+
+                if (state.finished) {
+                    Text(
+                        "Session saved ✨",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                } else {
+                    Button(
+                        onClick = viewModel::stop,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        )
+                    ) {
+                        Text("Stop")
+                    }
                 }
             }
+
+            // Celebration overlay fires when the session completes naturally.
+            Confetti(active = state.finished)
         }
     }
 }
