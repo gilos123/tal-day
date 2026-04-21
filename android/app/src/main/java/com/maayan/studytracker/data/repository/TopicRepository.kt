@@ -14,24 +14,43 @@ class TopicRepository @Inject constructor(
     private val folderDao: TopicFolderDao,
     private val noteDao: NoteDao
 ) {
-    suspend fun getOrCreateRootFolder(topicName: String): Long {
-        val existing = folderDao.getRoots(topicName).firstOrNull()
+    suspend fun getOrCreateRootFolder(projectId: Long, topicName: String): Long {
+        val existing = folderDao.getRoots(projectId, topicName).firstOrNull()
         if (existing != null) return existing.id
         return folderDao.insert(
-            TopicFolderEntity(topicName = topicName, parentFolderId = null, name = topicName)
+            TopicFolderEntity(
+                projectId = projectId,
+                topicName = topicName,
+                parentFolderId = null,
+                name = topicName
+            )
         )
     }
 
     suspend fun getFolder(id: Long): TopicFolderEntity? = folderDao.getById(id)
 
-    fun observeSubfolders(topicName: String, parentFolderId: Long): Flow<List<TopicFolderEntity>> =
-        folderDao.observeChildren(topicName, parentFolderId)
+    fun observeSubfolders(
+        projectId: Long,
+        topicName: String,
+        parentFolderId: Long
+    ): Flow<List<TopicFolderEntity>> =
+        folderDao.observeChildren(projectId, topicName, parentFolderId)
 
     fun observeNotes(folderId: Long): Flow<List<NoteEntity>> = noteDao.observeForFolder(folderId)
 
-    suspend fun createSubfolder(topicName: String, parentFolderId: Long, name: String): Long =
+    suspend fun createSubfolder(
+        projectId: Long,
+        topicName: String,
+        parentFolderId: Long,
+        name: String
+    ): Long =
         folderDao.insert(
-            TopicFolderEntity(topicName = topicName, parentFolderId = parentFolderId, name = name)
+            TopicFolderEntity(
+                projectId = projectId,
+                topicName = topicName,
+                parentFolderId = parentFolderId,
+                name = name
+            )
         )
 
     suspend fun createNote(folderId: Long, content: String): Long =

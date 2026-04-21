@@ -6,10 +6,12 @@ import androidx.room.PrimaryKey
 
 @Entity(
     tableName = "topic_folders",
-    indices = [Index("topicName"), Index("parentFolderId")]
+    indices = [Index("projectId"), Index("topicName"), Index("parentFolderId")]
 )
 data class TopicFolderEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    /** Scopes the folder tree to a specific project so each project has its own notes. */
+    val projectId: Long,
     val topicName: String,
     val parentFolderId: Long?,
     val name: String

@@ -47,14 +47,15 @@ import com.maayan.studytracker.data.db.entities.NoteStatus
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun TopicFolderScreen(
+    projectId: Long,
     topicName: String,
     initialFolderId: Long?,
     onOpenSubfolder: (Long) -> Unit,
     onBack: () -> Unit,
     viewModel: TopicFolderViewModel = hiltViewModel()
 ) {
-    LaunchedEffect(topicName, initialFolderId) {
-        viewModel.init(topicName, initialFolderId)
+    LaunchedEffect(projectId, topicName, initialFolderId) {
+        viewModel.init(projectId, topicName, initialFolderId)
     }
 
     val currentFolder by viewModel.currentFolder.collectAsStateWithLifecycle()

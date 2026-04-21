@@ -16,25 +16,29 @@ interface TopicFolderDao {
 
     @Query("""
         SELECT * FROM topic_folders
-        WHERE topicName = :topicName AND parentFolderId IS NULL
+        WHERE projectId = :projectId AND topicName = :topicName AND parentFolderId IS NULL
         ORDER BY name ASC
     """)
-    suspend fun getRoots(topicName: String): List<TopicFolderEntity>
+    suspend fun getRoots(projectId: Long, topicName: String): List<TopicFolderEntity>
 
     @Query("""
         SELECT * FROM topic_folders
-        WHERE topicName = :topicName AND parentFolderId = :parentId
+        WHERE projectId = :projectId AND topicName = :topicName AND parentFolderId = :parentId
         ORDER BY name ASC
     """)
-    fun observeChildren(topicName: String, parentId: Long): Flow<List<TopicFolderEntity>>
+    fun observeChildren(projectId: Long, topicName: String, parentId: Long): Flow<List<TopicFolderEntity>>
 
     @Query("""
         SELECT * FROM topic_folders
-        WHERE topicName = :topicName AND parentFolderId IS NULL
+        WHERE projectId = :projectId AND topicName = :topicName AND parentFolderId IS NULL
         ORDER BY name ASC
     """)
-    fun observeRoots(topicName: String): Flow<List<TopicFolderEntity>>
+    fun observeRoots(projectId: Long, topicName: String): Flow<List<TopicFolderEntity>>
 
     @Query("DELETE FROM topic_folders WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    /** Used when deleting a project so all its folders (and via NoteEntity FK, notes) are removed. */
+    @Query("DELETE FROM topic_folders WHERE projectId = :projectId")
+    suspend fun deleteAllForProject(projectId: Long)
 }

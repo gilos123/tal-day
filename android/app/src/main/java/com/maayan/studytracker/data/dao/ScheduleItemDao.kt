@@ -8,14 +8,14 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ScheduleItemDao {
-    @Query("SELECT * FROM schedule_items ORDER BY orderIndex ASC")
-    fun observeAll(): Flow<List<ScheduleItemEntity>>
+    @Query("SELECT * FROM schedule_items WHERE projectId = :projectId ORDER BY orderIndex ASC")
+    fun observeForProject(projectId: Long): Flow<List<ScheduleItemEntity>>
 
     @Query("SELECT * FROM schedule_items WHERE id = :id LIMIT 1")
     suspend fun getById(id: Long): ScheduleItemEntity?
 
-    @Query("SELECT COALESCE(MAX(orderIndex), -1) FROM schedule_items")
-    suspend fun maxOrder(): Int
+    @Query("SELECT COALESCE(MAX(orderIndex), -1) FROM schedule_items WHERE projectId = :projectId")
+    suspend fun maxOrderInProject(projectId: Long): Int
 
     @Insert
     suspend fun insert(item: ScheduleItemEntity): Long
@@ -31,4 +31,8 @@ interface ScheduleItemDao {
 
     @Query("DELETE FROM schedule_items WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    /** Used when deleting a project so all its rows are removed too. */
+    @Query("DELETE FROM schedule_items WHERE projectId = :projectId")
+    suspend fun deleteAllForProject(projectId: Long)
 }

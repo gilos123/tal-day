@@ -15,13 +15,13 @@ import com.maayan.studytracker.ui.topic.TopicFolderScreen
 object Routes {
     const val SCHEDULE = "schedule"
     const val TIMER = "timer"
-    const val TOPIC = "topic/{topicName}?folderId={folderId}"
+    const val TOPIC = "topic/{projectId}/{topicName}?folderId={folderId}"
     const val STATS = "stats"
 
-    fun topic(topicName: String, folderId: Long? = null): String {
+    fun topic(projectId: Long, topicName: String, folderId: Long? = null): String {
         val encoded = Uri.encode(topicName)
-        return if (folderId == null) "topic/$encoded?folderId=-1"
-        else "topic/$encoded?folderId=$folderId"
+        return if (folderId == null) "topic/$projectId/$encoded?folderId=-1"
+        else "topic/$projectId/$encoded?folderId=$folderId"
     }
 }
 
@@ -30,8 +30,8 @@ fun AppNavGraph(navController: NavHostController) {
     NavHost(navController = navController, startDestination = Routes.SCHEDULE) {
         composable(Routes.SCHEDULE) {
             ScheduleScreen(
-                onOpenTopic = { topicName ->
-                    navController.navigate(Routes.topic(topicName))
+                onOpenTopic = { projectId, topicName ->
+                    navController.navigate(Routes.topic(projectId, topicName))
                 },
                 onOpenStats = { navController.navigate(Routes.STATS) }
             )
@@ -42,6 +42,7 @@ fun AppNavGraph(navController: NavHostController) {
         composable(
             route = Routes.TOPIC,
             arguments = listOf(
+                navArgument("projectId") { type = NavType.LongType },
                 navArgument("topicName") { type = NavType.StringType },
                 navArgument("folderId") {
                     type = NavType.LongType
@@ -49,13 +50,15 @@ fun AppNavGraph(navController: NavHostController) {
                 }
             )
         ) { entry ->
+            val projectId = entry.arguments?.getLong("projectId") ?: return@composable
             val topicName = Uri.decode(entry.arguments?.getString("topicName").orEmpty())
             val folderIdArg = entry.arguments?.getLong("folderId") ?: -1L
             TopicFolderScreen(
+                projectId = projectId,
                 topicName = topicName,
                 initialFolderId = if (folderIdArg < 0) null else folderIdArg,
                 onOpenSubfolder = { subId ->
-                    navController.navigate(Routes.topic(topicName, subId))
+                    navController.navigate(Routes.topic(projectId, topicName, subId))
                 },
                 onBack = { navController.popBackStack() }
             )

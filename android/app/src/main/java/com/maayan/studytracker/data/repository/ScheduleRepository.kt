@@ -10,14 +10,16 @@ import javax.inject.Singleton
 class ScheduleRepository @Inject constructor(
     private val scheduleItemDao: ScheduleItemDao
 ) {
-    fun observeItems(): Flow<List<ScheduleItemEntity>> = scheduleItemDao.observeAll()
+    fun observeItemsForProject(projectId: Long): Flow<List<ScheduleItemEntity>> =
+        scheduleItemDao.observeForProject(projectId)
 
     suspend fun getItemById(id: Long): ScheduleItemEntity? = scheduleItemDao.getById(id)
 
-    suspend fun addRow(topicName: String = "", minutes: Int = 30) {
-        val nextOrder = scheduleItemDao.maxOrder() + 1
+    suspend fun addRow(projectId: Long, topicName: String = "", minutes: Int = 30) {
+        val nextOrder = scheduleItemDao.maxOrderInProject(projectId) + 1
         scheduleItemDao.insert(
             ScheduleItemEntity(
+                projectId = projectId,
                 topicName = topicName,
                 plannedDurationMinutes = minutes,
                 orderIndex = nextOrder

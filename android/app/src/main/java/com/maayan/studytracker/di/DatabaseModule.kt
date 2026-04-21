@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.maayan.studytracker.data.dao.NoteDao
+import com.maayan.studytracker.data.dao.ProjectDao
 import com.maayan.studytracker.data.dao.ScheduleItemDao
 import com.maayan.studytracker.data.dao.TimerSessionDao
 import com.maayan.studytracker.data.dao.TopicFolderDao
@@ -27,14 +28,46 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v3 → v4: introduce Projects.
+     *   1. Create the `projects` table.
+     *   2. Seed one default project named "My Schedule" so migrated rows have a home.
+     *   3. Add `projectId` columns + indices to `schedule_items` and `topic_folders`,
+     *      defaulting every existing row to the freshly-inserted default project (id=1).
+     *
+     * We deliberately skip declaring a foreign key so this ALTER-TABLE based migration
+     * stays simple (SQLite can't add FKs via ALTER). Cascading deletes of a project's
+     * schedule items + folders + notes are handled in the repository layer.
+     */
+    private val MIGRATION_3_4 = object : Migration(3, 4) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    name TEXT NOT NULL,
+                    orderIndex INTEGER NOT NULL
+                )
+                """.trimIndent()
+            )
+            db.execSQL("INSERT INTO projects (name, orderIndex) VALUES ('My Schedule', 0)")
+            // The insert above always produces rowid = 1 on a fresh `projects` table.
+            db.execSQL("ALTER TABLE schedule_items ADD COLUMN projectId INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_schedule_items_projectId ON schedule_items(projectId)")
+            db.execSQL("ALTER TABLE topic_folders ADD COLUMN projectId INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("CREATE INDEX IF NOT EXISTS index_topic_folders_projectId ON topic_folders(projectId)")
+        }
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AppDatabase =
         Room.databaseBuilder(context, AppDatabase::class.java, "maayan.db")
-            .addMigrations(MIGRATION_2_3)
+            .addMigrations(MIGRATION_2_3, MIGRATION_3_4)
             .fallbackToDestructiveMigration()
             .build()
 
+    @Provides fun provideProjectDao(db: AppDatabase): ProjectDao = db.projectDao()
     @Provides fun provideScheduleItemDao(db: AppDatabase): ScheduleItemDao = db.scheduleItemDao()
     @Provides fun provideTimerSessionDao(db: AppDatabase): TimerSessionDao = db.timerSessionDao()
     @Provides fun provideTopicFolderDao(db: AppDatabase): TopicFolderDao = db.topicFolderDao()
