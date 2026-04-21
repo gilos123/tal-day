@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+
 package com.maayan.studytracker.ui.theme
 
 import androidx.compose.material3.Typography
@@ -11,7 +13,9 @@ import androidx.compose.ui.unit.sp
 import com.maayan.studytracker.R
 
 // Variable-font entry per weight we care about. Android supports FontVariation
-// on API 26+ which matches our minSdk.
+// on API 26+ which matches our minSdk. The `variationSettings` parameter on the
+// Font(...) factory is still gated behind @ExperimentalTextApi in the current
+// Compose BOM — file-level opt-in above.
 private fun nunitoAt(weight: Int): Font = Font(
     resId = R.font.nunito_variable,
     weight = FontWeight(weight),
